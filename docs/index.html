@@ -1,0 +1,490 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>NMC-CXL Accelerator — Results &amp; Flit Playground</title>
+<style>
+  :root {
+    --page:#f7f8f7; --surface:#fcfcfb; --ink:#0b0b0b; --ink2:#52514e;
+    --muted:#898781; --grid:#e1e0d9; --baseline:#c3c2b7;
+    --border:rgba(11,11,11,.10); --accent:#2a78d6; --accent-ink:#1c5cab;
+    --good:#006300;
+    --f-hdr:#4a3aa7; --f-io:#2a78d6; --f-mem:#1baf7a; --f-ctrl:#eda100;
+    --f-crc:#e34948; --f-empty:#e1e0d9; --f-empty-ink:#52514e;
+    --mono:ui-monospace,"Cascadia Code",Consolas,Menlo,monospace;
+    --sans:system-ui,-apple-system,"Segoe UI",sans-serif;
+  }
+  @media (prefers-color-scheme: dark) { :root {
+    --page:#0d0d0d; --surface:#1a1a19; --ink:#ffffff; --ink2:#c3c2b7;
+    --muted:#898781; --grid:#2c2c2a; --baseline:#383835;
+    --border:rgba(255,255,255,.10); --accent:#3987e5; --accent-ink:#86b6ef;
+    --good:#0ca30c;
+    --f-hdr:#9085e9; --f-io:#3987e5; --f-mem:#199e70; --f-ctrl:#c98500;
+    --f-crc:#e66767; --f-empty:#2c2c2a; --f-empty-ink:#c3c2b7;
+  }}
+  :root[data-theme="light"] {
+    --page:#f7f8f7; --surface:#fcfcfb; --ink:#0b0b0b; --ink2:#52514e;
+    --muted:#898781; --grid:#e1e0d9; --baseline:#c3c2b7;
+    --border:rgba(11,11,11,.10); --accent:#2a78d6; --accent-ink:#1c5cab;
+    --good:#006300;
+    --f-hdr:#4a3aa7; --f-io:#2a78d6; --f-mem:#1baf7a; --f-ctrl:#eda100;
+    --f-crc:#e34948; --f-empty:#e1e0d9; --f-empty-ink:#52514e;
+  }
+  :root[data-theme="dark"] {
+    --page:#0d0d0d; --surface:#1a1a19; --ink:#ffffff; --ink2:#c3c2b7;
+    --muted:#898781; --grid:#2c2c2a; --baseline:#383835;
+    --border:rgba(255,255,255,.10); --accent:#3987e5; --accent-ink:#86b6ef;
+    --good:#0ca30c;
+    --f-hdr:#9085e9; --f-io:#3987e5; --f-mem:#199e70; --f-ctrl:#c98500;
+    --f-crc:#e66767; --f-empty:#2c2c2a; --f-empty-ink:#c3c2b7;
+  }
+  * { box-sizing:border-box; }
+  body {
+    margin:0; background:var(--page); color:var(--ink);
+    font:15px/1.55 var(--sans);
+  }
+  .wrap { max-width:1080px; margin:0 auto; padding:32px 20px 64px; }
+  header.top { display:flex; align-items:baseline; gap:14px; flex-wrap:wrap; margin-bottom:6px; }
+  h1 { font-size:26px; margin:0; letter-spacing:-.01em; text-wrap:balance; }
+  .badge {
+    font:600 12px/1 var(--mono); color:var(--good);
+    border:1px solid currentColor; border-radius:999px; padding:5px 10px;
+    white-space:nowrap;
+  }
+  .sub { color:var(--ink2); max-width:72ch; margin:6px 0 0; }
+  .themebtn {
+    margin-left:auto; background:var(--surface); color:var(--ink2);
+    border:1px solid var(--border); border-radius:6px; padding:6px 10px;
+    font:12px var(--mono); cursor:pointer;
+  }
+  .eyebrow {
+    font:600 11px/1 var(--mono); letter-spacing:.12em; text-transform:uppercase;
+    color:var(--muted); margin:34px 0 10px;
+  }
+  .card {
+    background:var(--surface); border:1px solid var(--border);
+    border-radius:8px; padding:18px;
+  }
+  /* KPI row */
+  .kpis { display:grid; grid-template-columns:repeat(auto-fit,minmax(190px,1fr)); gap:12px; }
+  .kpi .v { font:600 34px/1.1 var(--sans); letter-spacing:-.02em; }
+  .kpi .v small { font-size:18px; color:var(--ink2); font-weight:500; }
+  .kpi .l { color:var(--ink2); font-size:13px; margin-top:4px; }
+  .kpi .d { color:var(--muted); font-size:12px; font-family:var(--mono); margin-top:6px; }
+  /* chart */
+  .chartwrap { overflow-x:auto; }
+  svg text { font-family:var(--sans); }
+  .tip {
+    position:fixed; pointer-events:none; z-index:10; display:none;
+    background:var(--surface); border:1px solid var(--border); border-radius:6px;
+    padding:8px 10px; font:12px var(--mono); color:var(--ink);
+    box-shadow:0 2px 10px rgba(0,0,0,.15);
+  }
+  /* table */
+  table { border-collapse:collapse; width:100%; font-size:14px; }
+  th { text-align:left; color:var(--muted); font:600 11px var(--mono);
+       letter-spacing:.08em; text-transform:uppercase; padding:8px 10px;
+       border-bottom:1px solid var(--grid); }
+  td { padding:8px 10px; border-bottom:1px solid var(--grid); }
+  td.num { text-align:right; font-variant-numeric:tabular-nums; font-family:var(--mono); font-size:13px; }
+  tr:last-child td { border-bottom:none; }
+  .rx { color:var(--accent-ink); font-weight:600; }
+  /* flit playground */
+  .play { display:grid; grid-template-columns:290px 1fr; gap:18px; }
+  @media (max-width:760px) { .play { grid-template-columns:1fr; } }
+  .ctl label { display:block; font:600 11px var(--mono); letter-spacing:.08em;
+               text-transform:uppercase; color:var(--muted); margin:12px 0 4px; }
+  .ctl select,.ctl input {
+    width:100%; padding:7px 9px; font:13px var(--mono);
+    background:var(--page); color:var(--ink);
+    border:1px solid var(--border); border-radius:6px;
+  }
+  .btnrow { display:flex; gap:8px; flex-wrap:wrap; margin-top:16px; }
+  button.act {
+    padding:8px 12px; font:600 13px var(--sans); cursor:pointer;
+    border-radius:6px; border:1px solid var(--border);
+    background:var(--accent); color:#fff;
+  }
+  button.act.sec { background:var(--surface); color:var(--ink); }
+  button.act:focus-visible,.themebtn:focus-visible { outline:2px solid var(--accent); outline-offset:2px; }
+  .bytes { display:grid; grid-template-columns:repeat(17,minmax(26px,1fr)); gap:2px; }
+  .byte {
+    aspect-ratio:1; display:flex; align-items:center; justify-content:center;
+    font:11px var(--mono); color:#fff; border-radius:3px; position:relative;
+  }
+  .byte.f-empty { color:var(--f-empty-ink); }
+  .byte.corrupt { outline:2px solid var(--f-crc); outline-offset:1px; }
+  .fldlegend { display:flex; gap:14px; flex-wrap:wrap; margin:12px 0 2px; font-size:12px; color:var(--ink2); }
+  .fldlegend .sw { display:inline-block; width:10px; height:10px; border-radius:2px; margin-right:5px; vertical-align:-1px; }
+  .devlog {
+    margin-top:14px; background:var(--page); border:1px solid var(--border);
+    border-radius:6px; padding:12px; font:12.5px/1.7 var(--mono);
+    min-height:120px; white-space:pre-wrap; overflow-x:auto;
+  }
+  .devlog .ok { color:var(--good); }
+  .devlog .bad { color:var(--f-crc); }
+  .retry { display:flex; gap:4px; margin-top:10px; align-items:center; flex-wrap:wrap; }
+  .retry .slot {
+    width:34px; height:26px; border:1px solid var(--border); border-radius:4px;
+    display:flex; align-items:center; justify-content:center;
+    font:11px var(--mono); color:var(--muted); background:var(--page);
+  }
+  .retry .slot.full { background:var(--accent); color:#fff; border-color:transparent; }
+  .retry .cap { font:11px var(--mono); color:var(--muted); margin-right:6px; }
+  /* layer diagram */
+  .stack { display:flex; flex-direction:column; gap:6px; font:13px var(--mono); }
+  .lay { border:1px solid var(--border); border-radius:6px; padding:9px 12px;
+         background:var(--page); display:flex; justify-content:space-between; gap:10px; flex-wrap:wrap; }
+  .lay b { font-weight:600; }
+  .lay span { color:var(--muted); }
+  .lay.hl { border-color:var(--accent); }
+  .arrow { text-align:center; color:var(--muted); font:12px var(--mono); }
+  footer { margin-top:40px; color:var(--muted); font-size:13px; }
+  code, .mono { font-family:var(--mono); font-size:.92em; }
+  footer code { background:var(--surface); border:1px solid var(--border);
+                border-radius:4px; padding:2px 6px; }
+  @media (prefers-reduced-motion: no-preference) {
+    .byte,.retry .slot,button.act { transition:background .15s,outline-color .15s; }
+  }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<header class="top">
+  <h1>NMC-CXL Accelerator</h1>
+  <span class="badge">20/20 TESTS · LINT CLEAN</span>
+  <button class="themebtn" id="themebtn" type="button">theme: auto</button>
+</header>
+<p class="sub">A CXL 2.0 Type&nbsp;3 near-memory accelerator in synthesizable SystemVerilog with a
+from-scratch flit/link layer — no vendor IP. Numbers below are read from the RTL's own
+performance counters during Verilator simulation, not estimated.</p>
+
+<div class="eyebrow">Measured headlines</div>
+<div class="kpis">
+  <div class="card kpi">
+    <div class="v" id="k-att">—<small>×</small></div>
+    <div class="l">less CXL traffic, sparse attention</div>
+    <div class="d" id="k-att-d">seq 256 · d_k 64 · 50% sparse</div>
+  </div>
+  <div class="card kpi">
+    <div class="v" id="k-spmv">—<small>×</small></div>
+    <div class="l">less CXL traffic, SpMV</div>
+    <div class="d" id="k-spmv-d">256×256 · 10% density</div>
+  </div>
+  <div class="card kpi">
+    <div class="v" id="k-err">—<small>%</small></div>
+    <div class="l">attention error vs float64 reference</div>
+    <div class="d">Q8.8 inputs · Q16.16 softmax</div>
+  </div>
+  <div class="card kpi">
+    <div class="v" id="k-epc">—</div>
+    <div class="l">elements/cycle, dense mode</div>
+    <div class="d">8 PEs · bank-striped SRAM</div>
+  </div>
+</div>
+
+<div class="eyebrow">CXL link-traffic reduction (device counters vs CPU baseline)</div>
+<div class="card">
+  <div class="chartwrap"><svg id="chart" width="1020" height="250" role="img"
+    aria-label="Bar chart of CXL traffic reduction factors per workload"></svg></div>
+  <table id="rawtbl" style="margin-top:14px">
+    <thead><tr><th>Workload</th><th style="text-align:right">NMC words</th>
+      <th style="text-align:right">Baseline words</th><th style="text-align:right">Reduction</th></tr></thead>
+    <tbody></tbody>
+  </table>
+</div>
+
+<div class="eyebrow">Flit playground — the actual 68-byte frame, CRC and retry, in your browser</div>
+<div class="card play">
+  <div class="ctl">
+    <label for="op">Transaction</label>
+    <select id="op">
+      <option value="memw">CXL.mem — HDM write</option>
+      <option value="memr">CXL.mem — HDM read</option>
+      <option value="iow">CXL.io — MMIO write</option>
+      <option value="ior">CXL.io — MMIO read</option>
+    </select>
+    <label for="addr">Address (hex, word)</label>
+    <input id="addr" value="01A4" maxlength="4" spellcheck="false">
+    <label for="data">Data (hex, 32-bit)</label>
+    <input id="data" value="5EC0FFEE" maxlength="8" spellcheck="false">
+    <div class="btnrow">
+      <button class="act" id="pack" type="button">Pack flit</button>
+      <button class="act sec" id="corrupt" type="button">Corrupt a byte</button>
+      <button class="act sec" id="deliver" type="button">Deliver to device</button>
+    </div>
+    <div class="retry" id="retry" aria-label="device retry buffer"></div>
+    <div class="fldlegend">
+      <span><span class="sw" style="background:var(--f-hdr)"></span>header</span>
+      <span><span class="sw" style="background:var(--f-ctrl)"></span>LINK_CTRL slot</span>
+      <span><span class="sw" style="background:var(--f-io)"></span>CXL.io slot</span>
+      <span><span class="sw" style="background:var(--f-mem)"></span>CXL.mem slot</span>
+      <span><span class="sw" style="background:var(--f-crc)"></span>CRC-16</span>
+      <span><span class="sw" style="background:var(--f-empty)"></span>empty</span>
+    </div>
+  </div>
+  <div>
+    <div class="bytes" id="bytes"></div>
+    <div class="devlog" id="devlog">Pack a flit to begin. The byte layout, CRC-16-CCITT
+polynomial (0x1021), sequence numbering and go-back-N retry below mirror the RTL
+(rtl/cxl_flit_pack.sv, rtl/cxl_retry_buffer.sv) exactly.</div>
+  </div>
+</div>
+
+<div class="eyebrow">Layer stack</div>
+<div class="card">
+  <div class="stack">
+    <div class="lay"><b>C++ host model</b><span>golden CRC · credits · acks · resend-on-NAK</span></div>
+    <div class="arrow">▲▼ &nbsp;544-bit flit ports — the only external interface</div>
+    <div class="lay hl"><b>cxl_link_layer.sv</b><span>flit pack/unpack · CRC-16 · ARB/MUX · credits · 8-deep retry</span></div>
+    <div class="lay"><b>cxl_controller.sv</b><span>MMIO register map · HDM arbiter (flit-blind)</span></div>
+    <div class="lay hl"><b>nmc_engine.sv + scatter_gather_engine.sv</b><span>dense 8-lane groups · sparse 2-cycle indirection · reduction tree</span></div>
+    <div class="lay"><b>configurable_pe.sv ×8</b><span>16 ops · 56-bit runtime config · mask gate</span></div>
+    <div class="lay"><b>sram_bank.sv ×8</b><span>dual read ports · word A → bank A%8, offset A/8</span></div>
+  </div>
+</div>
+
+<footer>
+  Reproduce: <code>make sim</code> (20 tests) · <code>make results</code> (refresh this page's data)
+  · <code>make wave</code> (VCD) — repo <span class="mono">nmc-cxl-accelerator</span>,
+  design notes in <span class="mono">docs/ARCHITECTURE.md</span>.
+</footer>
+</div>
+
+<div class="tip" id="tip"></div>
+
+<script>
+"use strict";
+/* ---------- results (embedded by `make results`; fetch overrides when served) ---------- */
+let R = {
+  "attention.d_k": 64, "attention.max_abs_err": 0.00128387,
+  "attention.s50.baseline_words": 16384, "attention.s50.nmc_words": 256,
+  "attention.s50.nnz": 128, "attention.s50.reduction": 64,
+  "attention.s90.baseline_words": 3200, "attention.s90.nmc_words": 153,
+  "attention.s90.nnz": 25, "attention.s90.reduction": 20.915,
+  "attention.seq_len": 256,
+  "dense.elems_per_cycle": 7.75758, "dense.len1024_cycles": 132,
+  "flit.framing_overhead_pct": 5.88235,
+  "softmax.max_abs_err_len32": 2.83383e-05,
+  "spmv.d1.baseline_words": 1971, "spmv.d1.nmc_words": 259, "spmv.d1.reduction": 7.61004,
+  "spmv.d5.baseline_words": 9657, "spmv.d5.nmc_words": 259, "spmv.d5.reduction": 37.2857,
+  "spmv.d10.baseline_words": 19491, "spmv.d10.nmc_words": 259, "spmv.d10.reduction": 75.2548,
+  "spmv.n": 256
+};
+
+/* ---------- theme toggle: stamps data-theme, wins over the media query ---------- */
+const tb = document.getElementById("themebtn");
+const modes = ["auto","light","dark"]; let mi = 0;
+tb.addEventListener("click", () => {
+  mi = (mi + 1) % 3;
+  const m = modes[mi];
+  if (m === "auto") document.documentElement.removeAttribute("data-theme");
+  else document.documentElement.setAttribute("data-theme", m);
+  tb.textContent = "theme: " + m;
+  render();
+});
+
+/* ---------- KPIs, chart, table ---------- */
+const rows = () => [
+  { name:"Attention · 50% sparse", key:"attention.s50" },
+  { name:"Attention · 90% sparse", key:"attention.s90" },
+  { name:"SpMV · 10% density",     key:"spmv.d10" },
+  { name:"SpMV · 5% density",      key:"spmv.d5"  },
+  { name:"SpMV · 1% density",      key:"spmv.d1"  },
+].map(r => ({ ...r,
+  red:  R[r.key + ".reduction"] || 0,
+  nmc:  R[r.key + ".nmc_words"] || 0,
+  base: R[r.key + ".baseline_words"] || 0 }));
+
+const css = n => getComputedStyle(document.documentElement).getPropertyValue(n).trim();
+const tip = document.getElementById("tip");
+
+function render() {
+  document.getElementById("k-att").innerHTML  =
+    Math.round(R["attention.s50.reduction"]) + "<small>×</small>";
+  document.getElementById("k-spmv").innerHTML =
+    Math.round(R["spmv.d10.reduction"]) + "<small>×</small>";
+  document.getElementById("k-err").innerHTML  =
+    (R["attention.max_abs_err"] * 100).toFixed(2) + "<small>%</small>";
+  document.getElementById("k-epc").textContent =
+    R["dense.elems_per_cycle"].toFixed(2);
+
+  const data = rows(), svg = document.getElementById("chart");
+  const W = 1020, H = 250, L = 210, Rm = 90, T = 14, rh = 34, gap = 12;
+  const maxv = Math.max(...data.map(d => d.red)) * 1.06;
+  const x = v => L + (W - L - Rm) * v / maxv;
+  let s = "";
+  for (const gv of [0, 20, 40, 60, 80]) {
+    if (gv > maxv) break;
+    s += `<line x1="${x(gv)}" y1="${T}" x2="${x(gv)}" y2="${H-30}" stroke="${css("--grid")}" stroke-width="1"/>`;
+    s += `<text x="${x(gv)}" y="${H-12}" font-size="11" fill="${css("--muted")}" text-anchor="middle">${gv}×</text>`;
+  }
+  data.forEach((d, i) => {
+    const y = T + i * (rh + gap) / 1 * 0.92;
+    const bw = Math.max(x(d.red) - L, 3);
+    s += `<text x="${L-10}" y="${y+rh/2+4}" font-size="13" fill="${css("--ink2")}" text-anchor="end">${d.name}</text>`;
+    s += `<rect class="bar" data-i="${i}" x="${L}" y="${y}" width="${bw}" height="${rh-8}" rx="4"
+           fill="${css("--accent")}"/>`;
+    s += `<text x="${L+bw+8}" y="${y+rh/2+2}" font-size="13" font-weight="600"
+           fill="${css("--ink")}">${d.red.toFixed(d.red < 10 ? 1 : 0)}×</text>`;
+  });
+  s += `<line x1="${L}" y1="${T}" x2="${L}" y2="${H-30}" stroke="${css("--baseline")}" stroke-width="1"/>`;
+  svg.innerHTML = s;
+  svg.querySelectorAll(".bar").forEach(b => {
+    b.addEventListener("mousemove", e => {
+      const d = data[+b.dataset.i];
+      tip.style.display = "block";
+      tip.style.left = (e.clientX + 14) + "px";
+      tip.style.top  = (e.clientY + 10) + "px";
+      tip.innerHTML = `${d.name}<br>NMC: <b>${d.nmc.toLocaleString()}</b> words` +
+        `<br>baseline: <b>${d.base.toLocaleString()}</b> words`;
+    });
+    b.addEventListener("mouseleave", () => tip.style.display = "none");
+  });
+
+  const tb2 = document.querySelector("#rawtbl tbody");
+  tb2.innerHTML = data.map(d =>
+    `<tr><td>${d.name}</td><td class="num">${d.nmc.toLocaleString()}</td>` +
+    `<td class="num">${d.base.toLocaleString()}</td>` +
+    `<td class="num rx">${d.red.toFixed(1)}×</td></tr>`).join("");
+}
+
+/* try fresh results.json when served over http(s); fall back to embedded */
+if (location.protocol.startsWith("http")) {
+  fetch("results.json").then(r => r.ok ? r.json() : null)
+    .then(j => { if (j) { R = j; render(); } }).catch(() => {});
+}
+
+/* ---------- flit playground: same format rules as the RTL ---------- */
+const FLIT = 68, SLOTB = 16;
+function crc16(bytes, n) {                 // CRC-16-CCITT, poly 0x1021, init 0xFFFF
+  let c = 0xFFFF;
+  for (let k = 0; k < n; k++) {
+    c ^= bytes[k] << 8;
+    for (let i = 0; i < 8; i++) c = (c & 0x8000) ? ((c << 1) ^ 0x1021) & 0xFFFF : (c << 1) & 0xFFFF;
+  }
+  return c;
+}
+let hostSeq = 0, devSeq = 0, lastGoodDevAck = null;
+let flit = null, corrupted = false;
+const retryBuf = [];                        // device-tx retry window (seq numbers)
+
+function fieldOf(k, f) {
+  if (k < 2)  return ["f-hdr", "var(--f-hdr)"];
+  if (k >= 66) return ["f-crc", "var(--f-crc)"];
+  const s = Math.floor((k - 2) / SLOTB);
+  const t = (f[0] >> (2 * s)) & 3;
+  return t === 1 ? ["f-io", "var(--f-io)"] :
+         t === 2 ? ["f-mem", "var(--f-mem)"] :
+         t === 3 ? ["f-ctrl", "var(--f-ctrl)"] : ["f-empty", "var(--f-empty)"];
+}
+function drawFlit() {
+  const grid = document.getElementById("bytes");
+  if (!flit) { grid.innerHTML = ""; return; }
+  let h = "";
+  for (let k = 0; k < FLIT; k++) {
+    const [cls, col] = fieldOf(k, flit);
+    h += `<div class="byte ${cls}${corrupted && k === 20 ? " corrupt" : ""}"
+           style="background:${col}" title="byte ${k}">${flit[k].toString(16).padStart(2,"0")}</div>`;
+  }
+  grid.innerHTML = h;
+}
+function drawRetry() {
+  const el = document.getElementById("retry");
+  let h = `<span class="cap">device retry buf</span>`;
+  for (let i = 0; i < 8; i++) {
+    const seq = retryBuf[i];
+    h += `<div class="slot${seq !== undefined ? " full" : ""}">${seq !== undefined ? seq : "·"}</div>`;
+  }
+  el.innerHTML = h;
+}
+function log(html) {
+  const el = document.getElementById("devlog");
+  el.innerHTML = html;
+}
+
+document.getElementById("pack").addEventListener("click", () => {
+  const op = document.getElementById("op").value;
+  const addr = parseInt(document.getElementById("addr").value || "0", 16) & 0xFFFF;
+  const data = (parseInt(document.getElementById("data").value || "0", 16) >>> 0);
+  flit = new Uint8Array(FLIT); corrupted = false;
+  const isW = op.endsWith("w"), isIO = op.startsWith("io");
+  // slot0: LINK_CTRL ack of the last good device flit (as the C++ host model does)
+  let types = 0;
+  if (lastGoodDevAck !== null) {
+    types |= 3;                                   // slot0 = CTRL
+    flit[2] = 1; flit[3] = lastGoodDevAck & 0xF;  // ack_valid + ack seq
+  }
+  types |= (isIO ? 1 : 2) << 2;                   // slot1 = IO or MEM
+  const w0 = (isW ? 0x80000000 : 0) | (isW ? 0 : (7 << 16)) | addr;  // tag 7 on reads
+  const o = 2 + SLOTB;                            // slot1 offset
+  flit[o] = w0 & 0xFF; flit[o+1] = (w0 >>> 8) & 0xFF;
+  flit[o+2] = (w0 >>> 16) & 0xFF; flit[o+3] = (w0 >>> 24) & 0xFF;
+  flit[o+4] = data & 0xFF; flit[o+5] = (data >>> 8) & 0xFF;
+  flit[o+6] = (data >>> 16) & 0xFF; flit[o+7] = (data >>> 24) & 0xFF;
+  flit[0] = types; flit[1] = hostSeq & 0xF;
+  const c = crc16(flit, 66);
+  flit[66] = c & 0xFF; flit[67] = c >> 8;
+  drawFlit();
+  log(`host: packed flit seq=${hostSeq & 0xF} — ` +
+      `${isIO ? "CXL.io" : "CXL.mem"} ${isW ? "write" : "read"} @0x${addr.toString(16)}` +
+      `${isW ? " data=0x" + data.toString(16) : " (tag 7)"}\n` +
+      `CRC-16 over bytes 0..65 = <b>0x${c.toString(16).padStart(4,"0")}</b> → bytes 66-67\n` +
+      `slot0 = ${lastGoodDevAck !== null ? "LINK_CTRL (ack seq " + lastGoodDevAck + ")" : "empty (nothing to ack yet)"}, slot1 = transaction`);
+});
+
+document.getElementById("corrupt").addEventListener("click", () => {
+  if (!flit) { log("pack a flit first."); return; }
+  flit[20] ^= 0xA5; corrupted = true;
+  drawFlit();
+  log(`host: byte 20 flipped in transit (payload of slot 1).\n` +
+      `stored CRC bytes 66-67 no longer match — deliver it and watch the device NAK.`);
+});
+
+document.getElementById("deliver").addEventListener("click", () => {
+  if (!flit) { log("pack a flit first."); return; }
+  const c = crc16(flit, 66), stored = flit[66] | (flit[67] << 8);
+  const seq = flit[1] & 0xF;
+  if (c !== stored) {
+    log(`device: CRC check <span class="bad">FAIL</span> — computed 0x${c.toString(16).padStart(4,"0")}, ` +
+        `flit carries 0x${stored.toString(16).padStart(4,"0")}\n` +
+        `device: flit seq=${seq} <span class="bad">dropped</span>, nothing dispatched\n` +
+        `device → host: LINK_CTRL slot with <span class="bad">NAK seq=${seq}</span>\n` +
+        `host: re-sends its stored clean copy (software retry — the host owns replay\n` +
+        `for what it transmits; the device's 8-deep hardware buffer covers the other direction)`);
+    // host resends clean copy automatically in this demo
+    flit[20] ^= 0xA5; corrupted = false;
+    const c2 = crc16(flit, 66); flit[66] = c2 & 0xFF; flit[67] = c2 >> 8;
+    drawFlit();
+    return;
+  }
+  // good flit: device dispatches, responds; reads produce a response flit
+  const t1 = (flit[0] >> 2) & 3;
+  const o = 2 + SLOTB;
+  const w0 = flit[o] | (flit[o+1] << 8) | (flit[o+2] << 16) | (flit[o+3] << 24);
+  const isW = (w0 >>> 31) === 1;
+  const proto = t1 === 1 ? "CXL.io" : "CXL.mem";
+  hostSeq = (hostSeq + 1) & 0xF;
+  let out = `device: CRC <span class="ok">OK</span>, seq=${seq} accepted → ` +
+            `${proto} slot dispatched (${isW ? "posted write" : "read"})\n`;
+  const dseq = devSeq & 0xF;
+  if (retryBuf.length >= 8) retryBuf.shift();     // acked-out (demo simplification)
+  retryBuf.push(dseq);
+  out += `device: response flit seq=${dseq} → retry buffer slot ${retryBuf.length - 1} ` +
+         `(replayed from here on a host NAK — go-back-N)\n`;
+  out += isW
+    ? `device: write applied; credit returned via next LINK_CTRL slot`
+    : `device: response slot carries tag 7 + data; host matches tag, returns credit`;
+  lastGoodDevAck = dseq;
+  devSeq = (devSeq + 1) & 0xF;
+  log(out);
+  drawRetry();
+});
+
+drawRetry();
+render();
+</script>
+</body>
+</html>
