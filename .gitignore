@@ -1,0 +1,7 @@
+# build outputs
+obj_dir/
+build/
+
+# waveforms / logs
+*.vcd
+*.log
