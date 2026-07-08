@@ -100,6 +100,5 @@ for the PCIe hard IP's BAR interface and keep the whole compute side unchanged.
 
 ## AI Use and Tooling
 
-Built with AI assistance (Claude Code) from a spec and architecture I wrote,
-with me doing the timing-level debugging directly. More on that split, and
-the toolchain, in [TOOLING.md](TOOLING.md).
+These docs were drafted with AI assistance and edited by me. Code-level AI
+use and the build toolchain are in [TOOLING.md](TOOLING.md).
