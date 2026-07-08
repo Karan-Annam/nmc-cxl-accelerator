@@ -31,7 +31,7 @@ Two pieces I'm proud of:
 - [Quick start](#quick-start)
 - [How it's put together](#how-its-put-together)
 - [Honest scope](#honest-scope)
-- [Tooling](#tooling)
+- [AI Use and Tooling](#ai-use-and-tooling)
 
 ## Results (measured by the perf counters, not estimated)
 
@@ -98,7 +98,9 @@ format, standard CRC-16 polynomial, fixed retry depth, no LTSSM) while keeping
 every mechanism a link layer exists for. An FPGA port would swap the flit layer
 for the PCIe hard IP's BAR interface and keep the whole compute side unchanged.
 
-## Tooling
+## AI Use and Tooling
 
-Build toolchain, AI-assisted coding, and a real timing bug it surfaced are
-covered in [TOOLING.md](TOOLING.md).
+Up front: I used AI (Claude Code) throughout this project, for the code and
+for these docs, this section included. I wrote the spec, drove the build,
+and did the timing-level debugging myself. The build toolchain and a real
+bug that came out of the process are in [TOOLING.md](TOOLING.md).

@@ -1,7 +1,5 @@
 # Tooling
 
-What actually went into building, verifying, and writing this up.
-
 ## Build and verification
 
 - Verilator 5.x for the RTL simulation
@@ -14,21 +12,24 @@ What actually went into building, verifying, and writing this up.
 Host-specific gotchas (MSYS2 PATH ordering, the broken Perl `verilator`
 wrapper) are in [docs/BUILDING.md](docs/BUILDING.md).
 
-## AI-assisted coding
+## On AI use
 
-I used Claude Code as a coding tool throughout this project, the way a lot of
-people now pair-program with an LLM. I wrote the spec, ran the build, and did
-the timing-level debugging myself once the RTL was running against the flit
-model.
+Straightforward answer: yes, throughout. Claude Code did a lot of the
+first-draft work on both the RTL and the docs, including this file and the
+README, and I reviewed and edited all of it rather than shipping it
+untouched. I wrote the spec this was built against, ran the build myself,
+and did the timing-level debugging once the RTL was actually running against
+the flit model instead of just compiling.
 
-One real bug from that process: the scatter/gather engine's first draft
-registered its `step_idx` / `step_d` / `step_m` strobes. SRAM read ports here
-only hold valid data for the one cycle right after the address is driven, so
-registering the strobes made the engine's counters lag a state behind and pick
-up stale words instead of the ones it just fetched. The fix was asserting the
-strobes combinationally from the consuming state instead of a cycle later.
-That's the kind of bug you only catch by understanding exactly what a
-synchronous SRAM read port guarantees, not by pattern-matching working RTL.
+The bug that best shows I understood what was actually happening: the
+scatter/gather engine's first draft registered its `step_idx` / `step_d` /
+`step_m` strobes. SRAM read ports here only hold valid data for the one
+cycle right after the address is driven, so registering the strobes made the
+engine's counters lag a state behind and pick up stale words instead of the
+ones they'd just fetched. Fixing it meant asserting the strobes
+combinationally from the consuming state instead of a cycle later, the kind
+of fix you only get to by knowing exactly what a synchronous SRAM read port
+guarantees cycle by cycle, not by pattern-matching other working RTL.
 
-Happy to walk through the scatter/gather engine, the flit layer, or any of the
-sparse workload paths in more depth.
+Want to go deeper on the scatter/gather engine, the flit layer, or anything
+else here? Ask, happy to walk through it.
