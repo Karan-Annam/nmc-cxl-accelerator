@@ -13,14 +13,9 @@ Host quirks (MSYS2 PATH ordering, the broken Perl `verilator` wrapper) are in
 
 ## AI use
 
-Built with Claude Code from a spec and architecture I put together, with me
-doing the timing-level debugging directly once the RTL was running against
-the flit model.
-
-One bug worth mentioning: the scatter/gather engine originally registered
-its `step_idx` / `step_d` / `step_m` strobes, but SRAM read ports here only
-hold valid data for one cycle after the address is driven, so the registered
-version lagged a state behind and read stale words. Fixed by asserting the
-strobes combinationally instead.
+I wrote the RTL with AI assistance, then debugged it myself and read through
+it to modify things, the scatter/gather engine's timing needed more than one
+pass to get right once it was running against the flit model instead of
+just compiling clean.
 
 Ask about the scatter/gather engine, the flit layer, or anything else here.
