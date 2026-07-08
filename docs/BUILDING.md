@@ -6,7 +6,7 @@
 - g++ with C++17 (tested with GCC 15, MSYS2 UCRT64)
 - GNU Make, bash
 
-No Python needed — the testbench and host model are pure C++, and the results
+No Python needed. The testbench and host model are pure C++, and the results
 page (`docs/index.html`) is a static, self-contained HTML file.
 
 ## Targets
@@ -27,7 +27,7 @@ quirks below.
 
 1. `/c/msys64/ucrt64/bin` must come **first** on PATH. If a mingw64 dir wins,
    `cc1plus` loads mismatched gmp/mpfr DLLs and g++ dies with exit 1 and no
-   error message at all — `g++ --version` works, actual compiles don't.
+   error message at all. `g++ --version` works, actual compiles don't.
 2. The Perl `verilator` wrapper can be broken (`Can't locate Pod/Usage.pm`);
    the script calls `verilator_bin.exe` directly with `VERILATOR_ROOT` set.
 
@@ -37,7 +37,7 @@ invoke Verilator by hand. On Linux, plain `verilator` works as-is.
 ## The results page
 
 `docs/index.html` renders `docs/results.json` (the measured CXL-traffic
-numbers) and includes an interactive flit-layer demo — build a flit, corrupt a
+numbers) and includes an interactive flit-layer demo: build a flit, corrupt a
 byte, watch the CRC/NAK/retry behavior. It's fully static: open it in a browser
 locally, or serve it with GitHub Pages. `make results` re-runs the perf tests
 and rewrites the JSON.

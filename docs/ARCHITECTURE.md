@@ -10,7 +10,7 @@ A host CPU talks CXL 2.0 to a Type 3 near-memory accelerator. Large sparse worki
 sets (KV caches, sparse matrices, embedding tables, graph features) are loaded once
 into device memory (HDM) and stay there. A hardware **scatter/gather engine** resolves
 sparse index lists into local memory reads, feeds 8 **runtime-configurable PEs**, and
-returns only compact results — so the CXL link never carries the irregular traffic
+returns only compact results, so the CXL link never carries the irregular traffic
 that makes these workloads memory-bound. Every host↔device word crosses the boundary
 as a real **68-byte CXL flit** (CRC-16, ARB/MUX between CXL.io and CXL.mem, credits,
 sequence-numbered retry) implemented from the public spec with zero vendor IP; only
@@ -56,14 +56,14 @@ rtl/perf_counters.sv      CXL word transactions (the research metric) + bookkeep
    (mask-gated through the PE), and accumulates into a 64-entry vector register file,
    then writes the d_k-word result.
 5. **Readback:** host reads d_k words. Total per-query link traffic: Q + index list
-   in, output out — measured 256 words vs a 16,384-word baseline at 50% sparsity
+   in, output out. Measured 256 words vs a 16,384-word baseline at 50% sparsity
    (64×), 153 vs 3,200 at 90% (21×).
 
 ## Decisions worth knowing about
 
 - **Two-cycle sparse schedule, no stall logic.** Index fetch, data fetch, and
   operand-B fetch are placed on alternating cycles and different ports so no bank
-  port can ever double-book — correctness is index-pattern-independent by
+  port can ever double-book. Correctness is index-pattern-independent by
   construction. Cost: sparse throughput is 1 word / 2 cycles. Cycle counts are
   explicitly not a claimed metric; CXL transaction count is unaffected.
 - **PE mask gate does all masking.** A masked index entry zeroes the PE result and
@@ -71,10 +71,10 @@ rtl/perf_counters.sv      CXL word transactions (the research metric) + bookkeep
   engine special-casing anywhere.
 - **Asymmetric retry.** The device has a real 8-deep hardware retry buffer for what
   *it* transmits; the host (software) just re-sends flits it still holds when the
-  device NAKs. Each side owns replay for its own transmissions — same shape as real
+  device NAKs. Each side owns replay for its own transmissions, same shape as real
   links, half the RTL.
 - **Separate rx queues per protocol.** A stalled CXL.mem request (engine owns the
-  HDM ports while running) cannot head-of-line-block CXL.io status polls — that's
+  HDM ports while running) cannot head-of-line-block CXL.io status polls. That's
   the rx side of ARB/MUX, and `test_arb_mux_fairness` proves it.
 - **Credits vs HDM arbiter are orthogonal.** Credits bound how many host requests
   are in flight; the arbiter decides who owns the banks (host vs engine). The
@@ -82,7 +82,7 @@ rtl/perf_counters.sv      CXL word transactions (the research metric) + bookkeep
   stall, never loss.
 - **Q8.8 trick for fixed-point attention.** The PE multiplier returns the raw low
   32 bits. Storing Q/K/V in Q8.8 makes Q8.8×Q8.8 accumulate naturally into Q16.16
-  scores (exactly what softmax expects), and weights×V come out at scale 2^24 —
+  scores (exactly what softmax expects), and weights×V come out at scale 2^24,
   no shifter needed in the datapath, just host-side scale bookkeeping.
 
 ## Command semantics (what the 6 opcodes compute)
@@ -90,11 +90,11 @@ rtl/perf_counters.sv      CXL word transactions (the research metric) + bookkeep
 | Opcode | Result |
 |---|---|
 | `DENSE` | elementwise `dst[i] = op(A[a+i], B[b+i])` in 8-lane groups; MACC/SACC/MAX-acc configs instead fold to a scalar via the tree (dot product / sum / max) |
-| `SPARSE` | per index m: `dst[m] = Σ_d A[idx[m]·stride+d] · B[d]` — the Q·K row-dot |
+| `SPARSE` | per index m: `dst[m] = Σ_d A[idx[m]·stride+d] · B[d]`, the Q·K row-dot |
 | `SOFTMAX` | `dst[i] = exp(A[i]) / Σ exp` (Q16.16, two-pass) |
-| `WGATHER` | `dst[d] = Σ_m B[m] · A[idx[m]·stride+d]` — weighted row sum (attention output, SpMV rows at stride=1) |
-| `REDUCTION` | `dst[0] = fold(A[idx[m]·stride])` — sum (SACC) or max (MAX) fold; GNN aggregation |
-| `EMBEDDING` | `dst[m·stride+d] = A[idx[m]·stride+d]` — row copy-out (stride=1 → plain gather) |
+| `WGATHER` | `dst[d] = Σ_m B[m] · A[idx[m]·stride+d]`, weighted row sum (attention output, SpMV rows at stride=1) |
+| `REDUCTION` | `dst[0] = fold(A[idx[m]·stride])`, sum (SACC) or max (MAX) fold; GNN aggregation |
+| `EMBEDDING` | `dst[m·stride+d] = A[idx[m]·stride+d]`, row copy-out (stride=1 → plain gather) |
 
 ## Test map (20 tests, all green)
 
