@@ -16,7 +16,7 @@ mkdir -p build
 RTL="rtl/nmc_pkg.sv rtl/sram_bank.sv rtl/configurable_pe.sv rtl/config_regfile.sv \
      rtl/perf_counters.sv rtl/cxl_crc16.sv rtl/cxl_flit_pack.sv rtl/cxl_flit_unpack.sv \
      rtl/cxl_credit_ctrl.sv rtl/cxl_retry_buffer.sv rtl/cxl_arb_mux.sv \
-     rtl/cxl_link_layer.sv rtl/cxl_controller.sv rtl/scatter_gather_engine.sv \
+     rtl/cxl_link_perf.sv rtl/cxl_link_layer.sv rtl/cxl_controller.sv rtl/scatter_gather_engine.sv \
      rtl/softmax_unit.sv rtl/nmc_engine.sv rtl/nmc_top.sv"
 
 TESTS=$(ls sim/tests/*.cpp 2>/dev/null | tr '\n' ' ')

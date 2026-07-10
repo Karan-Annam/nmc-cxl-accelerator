@@ -26,6 +26,10 @@ module nmc_top
   logic [ADDR_WIDTH-1:0] hdm_addr;
   logic [DATA_WIDTH-1:0] hdm_wdata, hdm_rdata;
 
+  logic        perf_reset;   // driven by cxl_controller (declared before use here)
+  logic [31:0] lnk_crc_errs, lnk_naks_sent, lnk_retries;
+  logic [31:0] lnk_tx_stall_cyc, lnk_rx_nrdy_cyc, lnk_tx_flits, lnk_tx_slots;
+
   cxl_link_layer u_link (
     .clk(clk), .rst_n(rst_n),
     .flit_rx_valid(flit_rx_valid), .flit_rx_data(flit_rx_data),
@@ -36,7 +40,12 @@ module nmc_top
     .mmio_offset(mmio_offset), .mmio_wdata(mmio_wdata), .mmio_rdata(mmio_rdata),
     .hdm_valid(hdm_valid), .hdm_write(hdm_write),
     .hdm_addr(hdm_addr), .hdm_wdata(hdm_wdata),
-    .hdm_ready(hdm_ready), .hdm_rvalid(hdm_rvalid), .hdm_rdata(hdm_rdata)
+    .hdm_ready(hdm_ready), .hdm_rvalid(hdm_rvalid), .hdm_rdata(hdm_rdata),
+    .perf_reset(perf_reset),
+    .lnk_crc_errs(lnk_crc_errs), .lnk_naks_sent(lnk_naks_sent),
+    .lnk_retries(lnk_retries), .lnk_tx_stall_cyc(lnk_tx_stall_cyc),
+    .lnk_rx_nrdy_cyc(lnk_rx_nrdy_cyc), .lnk_tx_flits(lnk_tx_flits),
+    .lnk_tx_slots(lnk_tx_slots)
   );
 
   // ------------------------------------------------------------------
@@ -53,7 +62,7 @@ module nmc_top
   logic                  engine_busy, engine_error;
   logic [7:0]            engine_error_code;
 
-  logic                  perf_reset, cmd_issued_pulse, cxl_rd_inc, cxl_wr_inc;
+  logic                  cmd_issued_pulse, cxl_rd_inc, cxl_wr_inc;
   logic [63:0]           perf_cycles;
   logic [31:0]           perf_ops, perf_cxl_reads, perf_cxl_writes;
   logic [15:0]           perf_cmds;
@@ -77,7 +86,12 @@ module nmc_top
     .perf_reset(perf_reset), .cmd_issued_pulse(cmd_issued_pulse),
     .cxl_rd_inc(cxl_rd_inc), .cxl_wr_inc(cxl_wr_inc),
     .perf_cycles(perf_cycles), .perf_ops(perf_ops),
-    .perf_cxl_reads(perf_cxl_reads), .perf_cxl_writes(perf_cxl_writes)
+    .perf_cxl_reads(perf_cxl_reads), .perf_cxl_writes(perf_cxl_writes),
+    .perf_cmds(perf_cmds),
+    .lnk_crc_errs(lnk_crc_errs), .lnk_naks_sent(lnk_naks_sent),
+    .lnk_retries(lnk_retries), .lnk_tx_stall_cyc(lnk_tx_stall_cyc),
+    .lnk_rx_nrdy_cyc(lnk_rx_nrdy_cyc), .lnk_tx_flits(lnk_tx_flits),
+    .lnk_tx_slots(lnk_tx_slots)
   );
 
   // ------------------------------------------------------------------
@@ -131,9 +145,7 @@ module nmc_top
     .cmd_issued(cmd_issued_pulse),
     .cxl_rd_inc(cxl_rd_inc), .cxl_wr_inc(cxl_wr_inc),
     .cycles_active(perf_cycles), .ops_completed(perf_ops),
-    /* verilator lint_off PINCONNECTEMPTY */
     .commands_issued(perf_cmds),
-    /* verilator lint_on PINCONNECTEMPTY */
     .cxl_reads(perf_cxl_reads), .cxl_writes(perf_cxl_writes)
   );
 

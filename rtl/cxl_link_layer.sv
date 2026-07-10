@@ -32,7 +32,17 @@ module cxl_link_layer
   output logic [DATA_WIDTH-1:0] hdm_wdata,
   input  logic                  hdm_ready,
   input  logic                  hdm_rvalid,
-  input  logic [DATA_WIDTH-1:0] hdm_rdata
+  input  logic [DATA_WIDTH-1:0] hdm_rdata,
+
+  // link perf counters (MMIO-visible via cxl_controller)
+  input  logic                  perf_reset,
+  output logic [31:0]           lnk_crc_errs,
+  output logic [31:0]           lnk_naks_sent,
+  output logic [31:0]           lnk_retries,
+  output logic [31:0]           lnk_tx_stall_cyc,
+  output logic [31:0]           lnk_rx_nrdy_cyc,
+  output logic [31:0]           lnk_tx_flits,
+  output logic [31:0]           lnk_tx_slots
 );
 
   localparam int SLOT_W = 8*CXL_SLOT_BYTES;
@@ -147,7 +157,7 @@ module cxl_link_layer
   // Dispatchers: rx queues → controller ports → response slots
   // ------------------------------------------------------------------
   logic io_pop, mem_pop;
-  logic io_retired, mem_retired;
+  logic io_retired;
 
   // -- CXL.io (MMIO): controller answers reads combinationally
   logic [SLOT_W-1:0] io_head;
@@ -183,70 +193,99 @@ module cxl_link_layer
     end
   end
 
-  // -- CXL.mem (HDM): 1-cycle read latency, single outstanding
+  // -- CXL.mem (HDM): streaming dispatcher. Writes retire one per cycle;
+  //    reads issue back-to-back into a small pending FIFO (the SRAM answers
+  //    one cycle later) and responses push to the mem response queue in
+  //    order. A read only issues when a response slot is provably reservable
+  //    (mem_free > pend_cnt) — the arb/mux silently drops pushes when full,
+  //    so the reservation is what makes pipelining safe.
   logic [SLOT_W-1:0] mem_head;
   assign mem_head = mem_rxq[memrx_rd];
 
-  typedef enum logic [1:0] { M_IDLE, M_WAITR, M_PUSHR } mstate_e;
-  mstate_e mstate_q;
-  logic [31:0] mem_req_w0_q;   // word0 of in-flight read (for response tag/addr)
-  logic [31:0] mem_rdata_q;
+  // burst decode (nmc_pkg slot layout): count-1 words at addr, addr+1, addr+2
+  logic       head_burst;
+  logic [1:0] head_cnt1;
+  assign head_burst = mem_head[29];
+  assign head_cnt1  = head_burst ? mem_head[25:24] : 2'd0;
+
+  localparam int MPEND = 4;
+  logic [31:0] pend_w0   [MPEND];   // word0 of in-flight reads (tag/addr echo)
+  logic [1:0]  pend_lane [MPEND];   // which response word this read fills
+  logic        pend_last [MPEND];   // final word of its slot → push the response
+  logic [1:0]  pend_rd, pend_wr;
+  logic [2:0]  pend_cnt;
+  logic [PW:0] mem_free;
 
   logic mem_resp_push;
   logic [SLOT_W-1:0] mem_resp_slot;
   logic mem_respq_full;
+  logic [1:0] mem_retired_cnt;
+  logic [31:0] stage_d0, stage_d1;   // burst response words awaiting the last
+
+  logic [1:0]  bcnt_q;   // word index within the head slot (issue side)
+  logic        slot_done;
+  assign slot_done = (bcnt_q == head_cnt1);
+
+  logic rd_issue_ok, rd_fire, wr_fire, resp_last;
+  assign rd_issue_ok = ({29'd0, pend_cnt} < 32'(mem_free)) && (pend_cnt < 3'(MPEND));
+  assign rd_fire = (memrx_cnt != 0) && !mem_head[31] && rd_issue_ok && hdm_ready;
+  assign wr_fire = (memrx_cnt != 0) &&  mem_head[31] && hdm_ready;
+  assign resp_last = hdm_rvalid && pend_last[pend_rd];
 
   always_comb begin
-    hdm_valid     = 1'b0;
-    hdm_write     = 1'b0;
-    hdm_addr      = mem_head[15:0];
-    hdm_wdata     = mem_head[32 +: 32];
-    mem_pop       = 1'b0;
-    mem_retired   = 1'b0;
-    mem_resp_push = 1'b0;
+    hdm_valid = (memrx_cnt != 0) && (mem_head[31] || rd_issue_ok);
+    hdm_write = mem_head[31];
+    hdm_addr  = mem_head[15:0] + {14'd0, bcnt_q};
+    hdm_wdata = mem_head[(32 * ({3'd0, bcnt_q} + 5'd1)) +: 32];
+    mem_pop   = (wr_fire || rd_fire) && slot_done;
+
+    // response for the oldest in-flight read (data arrives 1 cycle after
+    // fire); burst words stage until the slot's last word lands
+    mem_resp_push = resp_last;
     mem_resp_slot = '0;
-    unique case (mstate_q)
-      M_IDLE: begin
-        if (memrx_cnt != 0) begin
-          hdm_valid = 1'b1;
-          hdm_write = mem_head[31];
-          if (hdm_ready) begin
-            mem_pop = 1'b1;
-            if (mem_head[31]) mem_retired = 1'b1;   // posted write retires now
-          end
-        end
+    mem_resp_slot[31:0] = pend_w0[pend_rd] | 32'h4000_0000;
+    unique case (pend_lane[pend_rd])
+      2'd0: mem_resp_slot[32 +: 32] = hdm_rdata;
+      2'd1: begin
+        mem_resp_slot[32 +: 32] = stage_d0;
+        mem_resp_slot[64 +: 32] = hdm_rdata;
       end
-      M_WAITR: ;   // waiting for hdm_rvalid (handled in ff)
-      M_PUSHR: begin
-        if (!mem_respq_full) begin
-          mem_resp_push = 1'b1;
-          mem_resp_slot[31:0]     = mem_req_w0_q | 32'h4000_0000;
-          mem_resp_slot[32 +: 32] = mem_rdata_q;
-          mem_retired = 1'b1;
-        end
+      default: begin
+        mem_resp_slot[32 +: 32] = stage_d0;
+        mem_resp_slot[64 +: 32] = stage_d1;
+        mem_resp_slot[96 +: 32] = hdm_rdata;
       end
-      default: ;
     endcase
+
+    // credits are per SLOT: a write slot retires with its last word, a read
+    // slot when its response pushes — the two can coincide
+    mem_retired_cnt = {1'b0, wr_fire && slot_done} + {1'b0, resp_last};
   end
 
   always_ff @(posedge clk or negedge rst_n) begin
     if (!rst_n) begin
-      mstate_q <= M_IDLE;
-      mem_req_w0_q <= '0;
-      mem_rdata_q  <= '0;
-    end else begin
-      unique case (mstate_q)
-        M_IDLE:  if (memrx_cnt != 0 && hdm_ready && !mem_head[31]) begin
-                   mem_req_w0_q <= mem_head[31:0];
-                   mstate_q <= M_WAITR;
-                 end
-        M_WAITR: if (hdm_rvalid) begin
-                   mem_rdata_q <= hdm_rdata;
-                   mstate_q <= M_PUSHR;
-                 end
-        M_PUSHR: if (!mem_respq_full) mstate_q <= M_IDLE;
-        default: mstate_q <= M_IDLE;
-      endcase
+      pend_rd <= '0; pend_wr <= '0; pend_cnt <= '0;
+      bcnt_q <= '0; stage_d0 <= '0; stage_d1 <= '0;
+    end else begin : pupd
+      logic [2:0] pc;
+      pc = pend_cnt;
+      if (wr_fire || rd_fire) bcnt_q <= slot_done ? 2'd0 : (bcnt_q + 2'd1);
+      if (rd_fire) begin
+        pend_w0[pend_wr]   <= mem_head[31:0];
+        pend_lane[pend_wr] <= bcnt_q;
+        pend_last[pend_wr] <= slot_done;
+        pend_wr <= pend_wr + 2'd1;
+        pc = pc + 3'd1;
+      end
+      if (hdm_rvalid) begin
+        if (!pend_last[pend_rd]) begin
+          if (pend_lane[pend_rd] == 2'd0) stage_d0 <= hdm_rdata;
+          else                            stage_d1 <= hdm_rdata;
+        end
+        pend_rd <= pend_rd + 2'd1;
+        pc = pc - 3'd1;
+      end
+      pend_cnt <= pc;
     end
   end
 
@@ -258,7 +297,7 @@ module cxl_link_layer
 
   cxl_credit_ctrl u_credit (
     .clk(clk), .rst_n(rst_n),
-    .io_retired(io_retired), .mem_retired(mem_retired),
+    .io_retired(io_retired), .mem_retired_cnt(mem_retired_cnt),
     .returns_taken(ctrl_sent),
     .io_credit_ret(io_cr_ret), .mem_credit_ret(mem_cr_ret),
     .returns_pending(cr_pending)
@@ -294,6 +333,7 @@ module cxl_link_layer
     .clk(clk), .rst_n(rst_n),
     .io_push(io_resp_push), .io_push_slot(io_resp_slot), .io_full(io_respq_full),
     .mem_push(mem_resp_push), .mem_push_slot(mem_resp_slot), .mem_full(mem_respq_full),
+    .mem_free(mem_free),
     .ctrl_valid(ctrl_valid), .ctrl_slot(ctrl_slot),
     .flit_take(flit_take), .any_pending(any_pending), .ctrl_taken(ctrl_taken),
     .slot_type(tx_stype), .slot_data(tx_sdata)
@@ -340,5 +380,33 @@ module cxl_link_layer
     if (!rst_n) tx_seq_q <= '0;
     else if (tx_store) tx_seq_q <= tx_seq_q + CXL_SEQ_W'(1);
   end
+
+  // ------------------------------------------------------------------
+  // link perf counters
+  // ------------------------------------------------------------------
+  // Slots are only counted for NEW flits: a replayed flit's slots were
+  // already counted when it was first transmitted.
+  logic [2:0] tx_slots_used;
+  always_comb begin
+    tx_slots_used = '0;
+    if (tx_fire && send_new)
+      for (int s = 0; s < CXL_SLOTS_PER_FLIT; s++)
+        if (tx_stype[s] != SLOT_EMPTY) tx_slots_used = tx_slots_used + 3'd1;
+  end
+
+  cxl_link_perf u_lnkperf (
+    .clk(clk), .rst_n(rst_n), .perf_reset(perf_reset),
+    .crc_err     (rx_fire && !rx_crc_ok),
+    .nak_sent    (ctrl_sent && naks_pending_q),
+    .retry_replay(ret_advance),
+    .tx_stall    (any_pending && !ret_replaying && ret_window_full),
+    .rx_nrdy     (!flit_rx_ready),
+    .tx_flit     (tx_fire),
+    .tx_slots    (tx_slots_used),
+    .lnk_crc_errs(lnk_crc_errs), .lnk_naks_sent(lnk_naks_sent),
+    .lnk_retries(lnk_retries), .lnk_tx_stall_cyc(lnk_tx_stall_cyc),
+    .lnk_rx_nrdy_cyc(lnk_rx_nrdy_cyc), .lnk_tx_flits(lnk_tx_flits),
+    .lnk_tx_slots(lnk_tx_slots)
+  );
 
 endmodule

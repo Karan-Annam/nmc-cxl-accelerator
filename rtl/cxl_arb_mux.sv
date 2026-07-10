@@ -15,6 +15,8 @@ module cxl_arb_mux
   input  logic                         mem_push,
   input  logic [8*CXL_SLOT_BYTES-1:0]  mem_push_slot,
   output logic                         mem_full,
+  output logic [$clog2(RXQ_DEPTH):0]   mem_free,   // free mem-queue slots (for
+                                                   // read-response reservation)
   // link-control slot (ack/nak/credit returns), built by the link layer
   input  logic                         ctrl_valid,
   input  logic [8*CXL_SLOT_BYTES-1:0]  ctrl_slot,
@@ -36,6 +38,7 @@ module cxl_arb_mux
 
   assign io_full  = (io_cnt  == QD[PW:0]);
   assign mem_full = (mem_cnt == QD[PW:0]);
+  assign mem_free = QD[PW:0] - mem_cnt;
 
   // --- slot selection (combinational) ---
   logic rr_q;   // 0: io first, 1: mem first

@@ -45,13 +45,20 @@ rtl/perf_counters.sv      CXL word transactions (the research metric) + bookkeep
    flit carries up to 3 write slots; the link layer CRC-checks, queues, and the
    controller stripes words across banks.
 2. **Scores:** host submits `CMD_SPARSE` (src_a=K, src_b=Q, idx list, stride=d_k).
-   For each index m: the SG engine fetches `idx[m]` (2-cycle SRAM handshake), latches
-   row j, then walks d=0..d_k-1 issuing `K[j·d_k+d]` on port A and `Q[d]` on port B of
-   the right banks. The PE at the data word's bank runs MACC. After the row, a
-   3-stage tree folds the 8 partial accumulators into `scores[m]`.
-3. **Softmax:** `CMD_SOFTMAX` hands the memory ports to the softmax unit: pass 1
-   computes exp via a 256-entry Q16.16 LUT with linear interpolation and accumulates
-   the 48-bit sum; pass 2 divides each exp by the sum with a serial restoring divider.
+   For each index m the SG engine walks the row **8 elements per cycle**: all 8
+   banks serve `K[j·d_k + 8c+p]` on their A ports and `Q[8c+p]` on their B ports
+   simultaneously, each PE running MACC on its lane. The next row's index is
+   prefetched during the current row's final walk cycle, chunk 0 issues in the
+   same cycle the index word lands (an address bypass in the SG engine), and a
+   3-stage *pipelined* tree folds the 8 partial accumulators into `scores[m]`
+   while row m+1 is already gathering. Steady state: ⌈d_k/8⌉+1 cycles per row
+   (~7.1 elements/cycle at d_k=64).
+3. **Softmax:** `CMD_SOFTMAX` hands the memory ports to the softmax unit: pass 0
+   scans the running maximum (numeric stability — softmax is shift-invariant, so
+   subtracting it costs nothing and makes any logit magnitude exact); pass 1
+   computes exp(x−max) via a 256-entry Q16.16 LUT with linear interpolation and
+   accumulates the 48-bit sum; pass 2 divides each exp by the sum with a serial
+   restoring divider.
 4. **Output:** `CMD_WGATHER` gathers `V[idx[m]][d]`, multiplies by `weights[m]`
    (mask-gated through the PE), and accumulates into a 64-entry vector register file,
    then writes the d_k-word result.
@@ -61,11 +68,30 @@ rtl/perf_counters.sv      CXL word transactions (the research metric) + bookkeep
 
 ## Decisions worth knowing about
 
-- **Two-cycle sparse schedule, no stall logic.** Index fetch, data fetch, and
-  operand-B fetch are placed on alternating cycles and different ports so no bank
-  port can ever double-book. Correctness is index-pattern-independent by
-  construction. Cost: sparse throughput is 1 word / 2 cycles. Cycle counts are
-  explicitly not a claimed metric; CXL transaction count is unaffected.
+- **8-wide sparse row walk, conflict-free by construction.** An 8-element
+  aligned chunk of a unit-stride stream touches each of the 8 banks exactly
+  once (addr%8 is a bijection over the chunk), and the chunk base is a multiple
+  of 8, so the lane→bank rotation is a per-row constant. The A-stream owns
+  every bank's port A, the B-stream port B, writes the write port — no bank
+  port can double-book, whatever the index pattern, with zero stall logic.
+  This is the dense lane pattern with the resolved row base substituted for
+  src_a; the original design walked 1 word / 2 cycles on a single bank.
+  **REDUCTION deliberately stays on the narrow schedule**: its per-index
+  gathers are arbitrary addresses — the one pattern where 8 simultaneous
+  fetches genuinely could collide on a bank.
+- **CXL.io and CXL.mem are unordered — and it bites.** The two protocols
+  dispatch from independent rx queues, so a posted burst write can still be
+  queued when a later MMIO `CMD_SUBMIT` fires the engine (which then locks the
+  host out of HDM and computes on half-written data). Burst writes in the host
+  model therefore fence on credit returns — all mem credits back ⇔ every write
+  slot has dispatched — costing idle cycles but zero link traffic. Same class
+  of hazard as the PERF_RESET quiesce rule; both are documented consequences
+  of per-protocol queueing, not bugs in it.
+- **Control traffic is measured, not ignored.** Every perf test reports a
+  ctrl-inclusive reduction charging CXL.io slots against the NMC side.
+  Attention (3 commands/query) keeps 1.9× with control counted; GNN's
+  command-per-(node,channel) style drops to 0.11× — fine-grained offload needs
+  command batching, and the metric exists precisely to say so out loud.
 - **PE mask gate does all masking.** A masked index entry zeroes the PE result and
   freezes its accumulator, so masked rows/entries produce 0 / are skipped with no
   engine special-casing anywhere.
@@ -91,19 +117,22 @@ rtl/perf_counters.sv      CXL word transactions (the research metric) + bookkeep
 |---|---|
 | `DENSE` | elementwise `dst[i] = op(A[a+i], B[b+i])` in 8-lane groups; MACC/SACC/MAX-acc configs instead fold to a scalar via the tree (dot product / sum / max) |
 | `SPARSE` | per index m: `dst[m] = Σ_d A[idx[m]·stride+d] · B[d]`, the Q·K row-dot |
-| `SOFTMAX` | `dst[i] = exp(A[i]) / Σ exp` (Q16.16, two-pass) |
+| `SOFTMAX` | `dst[i] = exp(A[i]−max) / Σ exp(A[j]−max)` (Q16.16, three-pass, exact for any logit range) |
 | `WGATHER` | `dst[d] = Σ_m B[m] · A[idx[m]·stride+d]`, weighted row sum (attention output, SpMV rows at stride=1) |
 | `REDUCTION` | `dst[0] = fold(A[idx[m]·stride])`, sum (SACC) or max (MAX) fold; GNN aggregation |
 | `EMBEDDING` | `dst[m·stride+d] = A[idx[m]·stride+d]`, row copy-out (stride=1 → plain gather) |
 
-## Test map (20 tests, all green)
+## Test map (25 tests, all green)
 
 Foundation: `sram_rw`, `pe_ops`, `dense_ops` · Flit layer: `flit_roundtrip`,
-`flit_crc`, `flit_retry`, `arb_mux_fairness`, `credit_backpressure`,
-`flit_perf_overhead` · Sparse: `scatter_gather`, `sparse_dot`, `sparse_reduction`,
-`embedding_lookup`, `gnn_aggregation` · Workloads: `softmax`, `sparse_attention`,
-`attention_perf`, `spmv`, `spmv_perf` · Robustness: `edge_cases`.
+`flit_crc`, `flit_retry`, `flit_burst`, `arb_mux_fairness`,
+`credit_backpressure`, `flit_perf_overhead`, `link_perf` · Sparse:
+`scatter_gather`, `sparse_dot`, `sparse_reduction`, `sparse_perf`,
+`embedding_lookup`, `gnn_aggregation` · Workloads: `softmax`, `softmax_range`,
+`sparse_attention`, `attention_perf`, `spmv`, `spmv_perf`, `gnn_perf` ·
+Robustness: `edge_cases`.
 
 Run everything: `make sim`. One test: `make test T=test_sparse_attention`.
 Waveforms: `make wave` → `build/waves.vcd`. Results refresh: `make results` →
-`docs/results.json`, rendered by the interactive page in `docs/index.html`.
+`docs/results.json`, re-embedded into the interactive page `docs/index.html`
+by `scripts/embed_results.sh` (so the page is fresh even opened as file://).

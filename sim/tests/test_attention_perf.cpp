@@ -40,6 +40,8 @@ TEST(test_attention_perf) {
         host.reset_perf();
         while (host.get_cxl_writes() != 0 || host.get_cxl_reads() != 0)
             host.pump(10);   // read-after-reset: window provably open at zero
+        uint32_t io_req0 = host.stat_io_req_slots, io_rx0 = host.stat_io_slots_rx;
+        uint64_t cyc0 = host.get_perf_cycles();
 
         std::vector<uint32_t> q(dk);
         for (auto& v : q) v = uint32_t(int32_t(std::lround(dist(rng) * 256.0)));
@@ -82,6 +84,19 @@ TEST(test_attention_perf) {
                baseline_words);
         metric("attention.s" + std::to_string(tag) + ".reduction", reduction);
         metric("attention.s" + std::to_string(tag) + ".nnz", nnz);
+        // ctrl-inclusive variant: CXL.io slots (16B = 4 link words) spent on
+        // command/config/status — the analytic baseline has no control term,
+        // so the headline excludes it; both are reported for fairness
+        {
+            uint32_t ctrl_slots = (host.stat_io_req_slots - io_req0) +
+                                  (host.stat_io_slots_rx - io_rx0);
+            metric("attention.s" + std::to_string(tag) + ".nmc_words_ctrl_incl",
+                   double(nmc_words) + 4.0 * ctrl_slots);
+            metric("attention.s" + std::to_string(tag) + ".reduction_ctrl_incl",
+                   double(baseline_words) / (double(nmc_words) + 4.0 * ctrl_slots));
+            metric("attention.s" + std::to_string(tag) + ".engine_cycles",
+                   double(host.get_perf_cycles() - cyc0));
+        }
 
         CHECK(nmc_words < baseline_words);       // NMC must win
         // expected per-query traffic: Q(dk wr) + idx(nnz wr) + out(dk rd)

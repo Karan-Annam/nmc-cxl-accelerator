@@ -11,7 +11,9 @@ module cxl_credit_ctrl
   input  logic       clk,
   input  logic       rst_n,
   input  logic       io_retired,      // an IO request slot finished dispatch
-  input  logic       mem_retired,     // a MEM request slot finished dispatch
+  input  logic [1:0] mem_retired_cnt, // MEM request slots finished dispatch this
+                                      // cycle (pipelined reads: a write retire
+                                      // and a read response can coincide)
   input  logic       returns_taken,   // arb/mux consumed the pending return counts
   output logic [7:0] io_credit_ret,   // pending credit returns (to LINK_CTRL slot)
   output logic [7:0] mem_credit_ret,
@@ -25,11 +27,11 @@ module cxl_credit_ctrl
     end else begin
       // retire and hand-off can coincide; the retired credit joins the *next* batch
       if (returns_taken) begin
-        io_credit_ret  <= io_retired  ? 8'd1 : 8'd0;
-        mem_credit_ret <= mem_retired ? 8'd1 : 8'd0;
+        io_credit_ret  <= io_retired ? 8'd1 : 8'd0;
+        mem_credit_ret <= {6'd0, mem_retired_cnt};
       end else begin
-        if (io_retired)  io_credit_ret  <= io_credit_ret  + 8'd1;
-        if (mem_retired) mem_credit_ret <= mem_credit_ret + 8'd1;
+        if (io_retired) io_credit_ret <= io_credit_ret + 8'd1;
+        mem_credit_ret <= mem_credit_ret + {6'd0, mem_retired_cnt};
       end
     end
   end

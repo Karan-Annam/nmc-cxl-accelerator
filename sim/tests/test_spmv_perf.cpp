@@ -46,6 +46,7 @@ TEST(test_spmv_perf) {
 
         // measured region: submit N row commands, read back N results
         host.reset_perf();
+        uint32_t io_req0 = host.stat_io_req_slots, io_rx0 = host.stat_io_slots_rx;
         host.download_config(ConfigBuilder().set_all(PE_MACC, SRC_SRAM_A).build());
         for (int i = 0; i < N; i++) {
             if (cols[i].empty()) continue;
@@ -70,6 +71,16 @@ TEST(test_spmv_perf) {
         metric("spmv.d" + std::to_string(tag) + ".nmc_words", nmc_words);
         metric("spmv.d" + std::to_string(tag) + ".baseline_words", baseline_words);
         metric("spmv.d" + std::to_string(tag) + ".reduction", reduction);
+        // ctrl-inclusive variant (CXL.io slots as 4 link words each; see
+        // test_attention_perf for the rationale)
+        {
+            uint32_t ctrl_slots = (host.stat_io_req_slots - io_req0) +
+                                  (host.stat_io_slots_rx - io_rx0);
+            metric("spmv.d" + std::to_string(tag) + ".nmc_words_ctrl_incl",
+                   double(nmc_words) + 4.0 * ctrl_slots);
+            metric("spmv.d" + std::to_string(tag) + ".reduction_ctrl_incl",
+                   double(baseline_words) / (double(nmc_words) + 4.0 * ctrl_slots));
+        }
         CHECK(nmc_words < baseline_words);
     }
     metric("spmv.n", N);

@@ -108,6 +108,13 @@ int main(int argc, char** argv) {
         }
     }
 
+    // suite size for the dashboard badge — full runs only, so a --test run
+    // can't clobber the count with 1/1
+    if (only.empty()) {
+        metric("suite.tests_total", double(ran));
+        metric("suite.tests_passed", double(ran - failures));
+    }
+
     if (!g_metrics().empty()) {
         std::ofstream js(json_path);
         js << "{\n";

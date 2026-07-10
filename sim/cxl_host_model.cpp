@@ -51,9 +51,12 @@ void CxlHostModel::process_rx(const CxlFlit& f) {
             // is software; it does not need a hardware retry window.
         } else if (t == SLOT_IO || t == SLOT_MEM) {
             uint32_t w0 = f.slot_word(s, 0);
-            if (w0 & 0x40000000u) {     // response
+            if (w0 & 0x40000000u) {     // response (possibly a multi-word burst)
                 uint8_t tag = uint8_t((w0 >> 16) & 0xFF);
-                responses_[tag] = f.slot_word(s, 1);
+                int n = (w0 & 0x20000000u) ? int(((w0 >> 24) & 3) + 1) : 1;
+                std::vector<uint32_t> v(static_cast<size_t>(n));
+                for (int w = 0; w < n; w++) v[size_t(w)] = f.slot_word(s, 1 + w);
+                responses_[tag] = std::move(v);
                 if (t == SLOT_IO) stat_io_slots_rx++;
                 else              stat_mem_slots_rx++;
             }
@@ -67,7 +70,7 @@ void CxlHostModel::pump(int cycles) {
         CxlFlit f;
         if (have)
             p_.sample_tx_data([&](uint8_t* raw) { std::memcpy(f.bytes, raw, FLIT_BYTES); });
-        p_.tick();
+        tick_();
         if (have) process_rx(f);
     }
     // standalone ack: keep the device retry window from filling while we idle
@@ -109,7 +112,7 @@ void CxlHostModel::send_flit(CxlFlit& f, bool consume_credits, int io_slots,
         CxlFlit rf;
         if (have)
             p_.sample_tx_data([&](uint8_t* raw) { std::memcpy(rf.bytes, raw, FLIT_BYTES); });
-        p_.tick();
+        tick_();
         if (have) process_rx(rf);
         if (ready) break;
     }
@@ -159,10 +162,14 @@ void CxlHostModel::set_tx_ready(bool r) {
 // transactions
 // ------------------------------------------------------------------
 uint32_t CxlHostModel::wait_response(uint8_t tag, uint32_t timeout) {
+    return wait_response_vec(tag, timeout)[0];
+}
+
+std::vector<uint32_t> CxlHostModel::wait_response_vec(uint8_t tag, uint32_t timeout) {
     for (uint32_t c = 0; c < timeout; c++) {
         auto it = responses_.find(tag);
         if (it != responses_.end()) {
-            uint32_t v = it->second;
+            std::vector<uint32_t> v = std::move(it->second);
             responses_.erase(it);
             return v;
         }
@@ -172,6 +179,7 @@ uint32_t CxlHostModel::wait_response(uint8_t tag, uint32_t timeout) {
 }
 
 void CxlHostModel::mmio_write(uint8_t offset, uint32_t value) {
+    stat_io_req_slots++;
     CxlFlit f;
     auto_ack_slot(f, 0);
     f.set_slot_type(1, SLOT_IO);
@@ -181,6 +189,7 @@ void CxlHostModel::mmio_write(uint8_t offset, uint32_t value) {
 }
 
 uint32_t CxlHostModel::mmio_read(uint8_t offset) {
+    stat_io_req_slots++;
     uint8_t tag = next_tag();
     CxlFlit f;
     auto_ack_slot(f, 0);
@@ -210,27 +219,63 @@ uint32_t CxlHostModel::mem_read(uint16_t addr) {
 }
 
 void CxlHostModel::mem_write_burst(uint16_t base, const std::vector<uint32_t>& data) {
-    // pack 3 MEM write slots per flit (slot 0 reserved for the ack ctrl slot)
+    // 3 burst-write slots per flit x 3 sequential words per slot = 9 words
+    // per flit (slot 0 reserved for the ack ctrl slot); credits are per slot
     size_t i = 0;
     while (i < data.size()) {
-        int n = int(std::min<size_t>(3, data.size() - i));
-        wait_credits(0, n);
+        int slots = 0;
         CxlFlit f;
-        auto_ack_slot(f, 0);
-        for (int s = 0; s < n; s++) {
-            f.set_slot_type(1 + s, SLOT_MEM);
-            f.set_slot_word(1 + s, 0, 0x80000000u | uint16_t(base + i + s));
-            f.set_slot_word(1 + s, 1, data[i + s]);
+        size_t j = i;
+        for (int s = 1; s < SLOTS_PER_FLIT && j < data.size(); s++) {
+            int n = int(std::min<size_t>(3, data.size() - j));
+            f.set_burst_write(s, uint16_t(base + j), &data[j], n);
+            j += size_t(n);
+            slots++;
         }
-        send_flit(f, true, 0, n);
-        i += n;
+        wait_credits(0, slots);
+        auto_ack_slot(f, 0);
+        send_flit(f, true, 0, slots);
+        i = j;
     }
+    // Fence: CXL.io and CXL.mem dispatch from independent queues, so a
+    // subsequent MMIO command submit could overtake still-queued burst writes
+    // (a 3-word slot takes 3 dispatch cycles). All mem credits returned ⇔
+    // every write slot has retired — an ordering guarantee that costs idle
+    // cycles only, no extra link traffic.
+    for (uint32_t c = 0; c < 200000 && mem_credits < INIT_CREDITS; c++) pump(1);
 }
 
 void CxlHostModel::mem_read_burst(uint16_t base, std::vector<uint32_t>& result,
                                   size_t n) {
+    // 3 burst-read slots per flit x 3 words per slot; distinct tag per slot,
+    // responses collected as multi-word slots (the device pipelines dispatch)
     result.resize(n);
-    for (size_t i = 0; i < n; i++) result[i] = mem_read(uint16_t(base + i));
+    size_t i = 0;
+    while (i < n) {
+        int slots = 0;
+        uint8_t tags[3] = {0, 0, 0};
+        int     lens[3] = {0, 0, 0};
+        CxlFlit f;
+        size_t j = i;
+        for (int s = 1; s < SLOTS_PER_FLIT && j < n; s++) {
+            int k = int(std::min<size_t>(3, n - j));
+            tags[slots] = next_tag();
+            lens[slots] = k;
+            f.set_burst_read(s, uint16_t(base + j), tags[slots], k);
+            j += size_t(k);
+            slots++;
+        }
+        wait_credits(0, slots);
+        auto_ack_slot(f, 0);
+        send_flit(f, true, 0, slots);
+        size_t pos = i;
+        for (int s = 0; s < slots; s++) {
+            std::vector<uint32_t> v = wait_response_vec(tags[s], 100000);
+            for (int w = 0; w < lens[s]; w++) result[pos + size_t(w)] = v[size_t(w)];
+            pos += size_t(lens[s]);
+        }
+        i = j;
+    }
 }
 
 // ------------------------------------------------------------------

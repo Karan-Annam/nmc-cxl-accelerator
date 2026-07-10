@@ -25,8 +25,9 @@ TEST(test_flit_perf_overhead) {
                 " tax per flit)\n", singles, bursts, framing_pct);
     metric("flit.singles_30wr", singles);
     metric("flit.burst_30wr", bursts);
+    metric("flit.words_per_flit_burst", 30.0 / double(bursts));
     CHECK(bursts < singles);
-    CHECK(bursts <= 10 + 2);      // ceil(30/3) plus possible standalone acks
+    CHECK(bursts <= 4 + 2);       // ceil(30/9) plus possible standalone acks
 
     // all 30 landed either way
     for (int i = 0; i < 30; i++) {

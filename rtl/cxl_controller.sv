@@ -55,7 +55,17 @@ module cxl_controller
   input  logic [63:0]           perf_cycles,
   input  logic [31:0]           perf_ops,
   input  logic [31:0]           perf_cxl_reads,
-  input  logic [31:0]           perf_cxl_writes
+  input  logic [31:0]           perf_cxl_writes,
+  input  logic [15:0]           perf_cmds,
+
+  // link perf counters (read-only mirrors from cxl_link_layer)
+  input  logic [31:0]           lnk_crc_errs,
+  input  logic [31:0]           lnk_naks_sent,
+  input  logic [31:0]           lnk_retries,
+  input  logic [31:0]           lnk_tx_stall_cyc,
+  input  logic [31:0]           lnk_rx_nrdy_cyc,
+  input  logic [31:0]           lnk_tx_flits,
+  input  logic [31:0]           lnk_tx_slots
 );
 
   // ---------------- command/config staging registers ----------------
@@ -167,6 +177,14 @@ module cxl_controller
       R_PERF_OPS:       mmio_rdata = perf_ops;
       R_PERF_CXL_RD:    mmio_rdata = perf_cxl_reads;
       R_PERF_CXL_WR:    mmio_rdata = perf_cxl_writes;
+      R_PERF_CMDS:      mmio_rdata = {16'd0, perf_cmds};
+      R_LNK_CRC_ERRS:   mmio_rdata = lnk_crc_errs;
+      R_LNK_NAKS:       mmio_rdata = lnk_naks_sent;
+      R_LNK_RETRIES:    mmio_rdata = lnk_retries;
+      R_LNK_TXSTALL:    mmio_rdata = lnk_tx_stall_cyc;
+      R_LNK_RXNRDY:     mmio_rdata = lnk_rx_nrdy_cyc;
+      R_LNK_TX_FLITS:   mmio_rdata = lnk_tx_flits;
+      R_LNK_TX_SLOTS:   mmio_rdata = lnk_tx_slots;
       default:          mmio_rdata = '0;
     endcase
   end

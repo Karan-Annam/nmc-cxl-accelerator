@@ -100,6 +100,15 @@ package nmc_pkg;
   parameter logic [7:0] R_PERF_CXL_WR    = 8'h4C;
   parameter logic [7:0] R_PERF_RESET     = 8'h50;
   parameter logic [7:0] R_ERROR_CODE     = 8'h54;
+  // link-layer perf counters (cleared by R_PERF_RESET like the engine set)
+  parameter logic [7:0] R_LNK_CRC_ERRS   = 8'h58;
+  parameter logic [7:0] R_LNK_NAKS       = 8'h5C;
+  parameter logic [7:0] R_LNK_RETRIES    = 8'h60;
+  parameter logic [7:0] R_LNK_TXSTALL    = 8'h64;
+  parameter logic [7:0] R_LNK_RXNRDY     = 8'h68;
+  parameter logic [7:0] R_LNK_TX_FLITS   = 8'h6C;
+  parameter logic [7:0] R_LNK_TX_SLOTS   = 8'h70;
+  parameter logic [7:0] R_PERF_CMDS      = 8'h74;
 
   parameter logic [31:0] DEVICE_ID_VAL = 32'hCA55_0001;
 
@@ -122,9 +131,13 @@ package nmc_pkg;
   parameter logic [1:0] SLOT_CTRL  = 2'b11;
 
   // Transaction slot layout (16B = 4 x 32-bit little-endian words):
-  //  word0: [31] is_write  [30] is_response  [23:16] tag  [15:0] address
-  //  word1: data
-  //  word2, word3: reserved (zero)
+  //  word0: [31] is_write  [30] is_response  [29] is_burst
+  //         [25:24] count-1 (burst only, 1..3 words)
+  //         [23:16] tag  [15:0] address
+  //  word1..3: data at address, address+1, address+2 (count words)
+  // is_burst=0 parses exactly as the original single-word format (word1 =
+  // data, words 2-3 reserved zero) — the bit was always 0 on both sides, so
+  // legacy flits are bit-identical and the extension is wire-compatible.
   // LINK_CTRL slot layout:
   //  byte0: bit0 ack_valid, bit1 nak_valid
   //  byte1: [3:0] ack/nak sequence number

@@ -1,8 +1,12 @@
-// Two-pass fixed-point softmax over a score vector in HDM, Q16.16 throughout.
-// Pass 1: exp(x) via a 256-entry LUT over [-8,8) with linear interpolation,
-// written to dst as scratch, sum S accumulated (48-bit). Pass 2:
-// weight = exp<<16 / S with a serial restoring divider — exact, and cycle
-// count isn't a claimed metric here, so simple beats fast.
+// Three-pass fixed-point softmax over a score vector in HDM, Q16.16
+// throughout. Pass 0 scans the running maximum; pass 1 computes exp(x - max)
+// via a 256-entry LUT over [-8,8) with linear interpolation, written to dst
+// as scratch, sum S accumulated (48-bit); pass 2: weight = exp<<16 / S with a
+// serial restoring divider — exact, and cycle count isn't a claimed metric
+// here, so simple beats fast.
+// The max-subtraction makes the result exact for logits of ANY magnitude
+// (softmax is shift-invariant): post-shift inputs are always <= 0, inside the
+// LUT's covered half, and values below -8 correctly underflow to weight 0.
 // Memory interface: at most one read + one write command per cycle, granted
 // the bank ports by nmc_top while sm_busy is high.
 module softmax_unit
@@ -65,15 +69,23 @@ module softmax_unit
 
   // ---------------- FSM ----------------
   typedef enum logic [3:0] {
-    S_IDLE, S_P1_ISSUE, S_P1_WAIT, S_P1_WRITE,
+    S_IDLE, S_MX_ISSUE, S_MX_WAIT, S_P1_ISSUE, S_P1_WAIT, S_P1_WRITE,
     S_P2_ISSUE, S_P2_WAIT, S_DIV, S_P2_WRITE, S_DONE
   } state_e;
   state_e st_q;
 
   logic [ADDR_WIDTH-1:0] src_q, dst_q;
   logic [15:0] len_q, i_q;
+  logic signed [31:0] max_q;       // pass-0 running maximum (numeric stability)
   logic [47:0] sum_q;              // sum of exp values (Q16.16, up to 64K entries)
   logic [31:0] exp_q;
+
+  // x - max in 33 bits (Q16.16 differences can exceed 32-bit range), clamped
+  // to the exp underflow floor: exp_q16 returns 0 for anything <= -8.0 anyway
+  logic signed [32:0] diff33;
+  logic signed [31:0] shifted;
+  assign diff33  = {rd_data[31], rd_data} - {max_q[31], max_q};
+  assign shifted = (diff33 <= -33'sd524288) ? -32'sd524288 : diff33[31:0];
 
   // serial restoring divider: num / den, 48 iterations
   logic [63:0] div_num_q;          // exp << 16
@@ -97,6 +109,11 @@ module softmax_unit
     wr_off  = '0;
     wr_data = '0;
     unique case (st_q)
+      S_MX_ISSUE: begin
+        rd_en   = 1'b1;
+        rd_bank = bank_of(cur_src_addr);
+        rd_off  = off_of(cur_src_addr);
+      end
       S_P1_ISSUE: begin
         rd_en   = 1'b1;
         rd_bank = bank_of(cur_src_addr);
@@ -127,7 +144,7 @@ module softmax_unit
     if (!rst_n) begin
       st_q <= S_IDLE;
       src_q <= '0; dst_q <= '0; len_q <= '0; i_q <= '0;
-      sum_q <= '0; exp_q <= '0; sm_done <= 1'b0;
+      sum_q <= '0; exp_q <= '0; sm_done <= 1'b0; max_q <= 32'sh8000_0000;
       div_num_q <= '0; div_den_q <= '0; div_rem_q <= '0; div_quo_q <= '0; div_i_q <= '0;
     end else begin
       sm_done <= 1'b0;
@@ -136,12 +153,24 @@ module softmax_unit
           if (sm_start) begin
             src_q <= sm_src; dst_q <= sm_dst; len_q <= sm_len;
             i_q <= '0; sum_q <= '0;
-            st_q <= (sm_len == 0) ? S_DONE : S_P1_ISSUE;
+            max_q <= 32'sh8000_0000;
+            st_q <= (sm_len == 0) ? S_DONE : S_MX_ISSUE;
+          end
+        end
+        S_MX_ISSUE: st_q <= S_MX_WAIT;
+        S_MX_WAIT: begin
+          if ($signed(rd_data) > max_q) max_q <= $signed(rd_data);
+          if (i_q + 16'd1 >= len_q) begin
+            i_q  <= '0;
+            st_q <= S_P1_ISSUE;
+          end else begin
+            i_q  <= i_q + 16'd1;
+            st_q <= S_MX_ISSUE;
           end
         end
         S_P1_ISSUE: st_q <= S_P1_WAIT;
         S_P1_WAIT: begin
-          exp_q <= exp_q16($signed(rd_data));
+          exp_q <= exp_q16(shifted);
           st_q  <= S_P1_WRITE;
         end
         S_P1_WRITE: begin

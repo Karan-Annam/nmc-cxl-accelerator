@@ -32,7 +32,10 @@ enum MmioReg : uint8_t {
     REG_CFG_WORD_LO = 0x30, REG_CFG_WORD_HI = 0x34, REG_CFG_SUBMIT = 0x38,
     REG_PERF_CYCLES_LO = 0x3C, REG_PERF_CYCLES_HI = 0x40, REG_PERF_OPS = 0x44,
     REG_PERF_CXL_RD = 0x48, REG_PERF_CXL_WR = 0x4C, REG_PERF_RESET = 0x50,
-    REG_ERROR_CODE = 0x54
+    REG_ERROR_CODE = 0x54,
+    REG_LNK_CRC_ERRS = 0x58, REG_LNK_NAKS = 0x5C, REG_LNK_RETRIES = 0x60,
+    REG_LNK_TXSTALL = 0x64, REG_LNK_RXNRDY = 0x68, REG_LNK_TX_FLITS = 0x6C,
+    REG_LNK_TX_SLOTS = 0x70, REG_PERF_CMDS = 0x74
 };
 
 // command opcodes (mirror nmc_pkg.sv)
@@ -59,6 +62,20 @@ struct CxlFlit {
     }
     void set_slot_word(int s, int w, uint32_t v) {
         std::memcpy(&bytes[2 + SLOT_BYTES * s + 4 * w], &v, 4);
+    }
+
+    // burst slots (word0 bit29 + count-1 in [25:24]; see nmc_pkg.sv): n
+    // sequential words at addr, addr+1, addr+2. n=1..3.
+    void set_burst_write(int s, uint16_t addr, const uint32_t* d, int n) {
+        set_slot_type(s, SLOT_MEM);
+        set_slot_word(s, 0, 0x80000000u | 0x20000000u |
+                            (uint32_t(n - 1) << 24) | addr);
+        for (int w = 0; w < n; w++) set_slot_word(s, 1 + w, d[w]);
+    }
+    void set_burst_read(int s, uint16_t addr, uint8_t tag, int n) {
+        set_slot_type(s, SLOT_MEM);
+        set_slot_word(s, 0, 0x20000000u | (uint32_t(n - 1) << 24) |
+                            (uint32_t(tag) << 16) | addr);
     }
 
     static uint16_t crc16(const uint8_t* data, int n) {
@@ -121,6 +138,9 @@ class CxlHostModel {
     uint32_t get_perf_ops();
     uint32_t get_cxl_reads();
     uint32_t get_cxl_writes();
+    uint32_t get_perf_cmds()  { return mmio_read(REG_PERF_CMDS); }
+    // link-layer counters (device-side; see cxl_link_perf.sv)
+    uint32_t get_lnk(uint8_t reg) { return mmio_read(reg); }
     void     reset_perf();
 
     // ---- flit layer primitives / test hooks ----
@@ -141,16 +161,20 @@ class CxlHostModel {
     uint32_t stat_resends       = 0;   // host retransmissions after device NAK
     uint32_t stat_io_slots_rx   = 0;   // response slots received per protocol
     uint32_t stat_mem_slots_rx  = 0;
+    uint32_t stat_io_req_slots  = 0;   // MMIO request slots sent (ctrl-traffic accounting)
+    uint64_t stat_cycles        = 0;   // clock cycles this model has driven
     int      io_credits  = INIT_CREDITS;
     int      mem_credits = INIT_CREDITS;
     CxlFlit  last_rx;                  // last good device flit (raw)
     uint8_t  last_dev_seq = 0xFF;      // latest good device seq (0xFF = none yet)
 
   private:
+    void tick_() { p_.tick(); ++stat_cycles; }
     void process_rx(const CxlFlit& f);
     void wait_credits(int io_need, int mem_need, uint32_t timeout = 200000);
     void auto_ack_slot(CxlFlit& f, int s);
     uint32_t wait_response(uint8_t tag, uint32_t timeout);
+    std::vector<uint32_t> wait_response_vec(uint8_t tag, uint32_t timeout);
     uint8_t next_tag() { return tag_ctr_++; }
 
     DutPins  p_;
@@ -162,5 +186,5 @@ class CxlHostModel {
     int      rcvd_since_ack_ = 0;
     CxlFlit  last_sent_;               // for retransmit after device NAK
     bool     have_last_sent_ = false;
-    std::map<uint8_t, uint32_t> responses_;   // tag → data
+    std::map<uint8_t, std::vector<uint32_t>> responses_;   // tag → data word(s)
 };
