@@ -192,13 +192,16 @@ module nmc_top
     );
   end
 
-  // registered read-bank selects for the 1-cycle-latency data muxes
-  logic [2:0] host_rbank_q, sm_rd_bank_q;
+  // registered read-bank selects for the 2-cycle-latency data muxes
+  // (two stages to match the bank outpost register + BRAM internal register)
+  logic [2:0] host_rbank_q, sm_rd_bank_q, host_rbank_q2, sm_rd_bank_q2;
   always_ff @(posedge clk) begin
-    host_rbank_q <= host_rbank;
-    sm_rd_bank_q <= sm_rd_bank;
+    host_rbank_q  <= host_rbank;
+    sm_rd_bank_q  <= sm_rd_bank;
+    host_rbank_q2 <= host_rbank_q;
+    sm_rd_bank_q2 <= sm_rd_bank_q;
   end
-  assign host_rdata = rdata_a[host_rbank_q];
-  assign sm_rd_data = rdata_a[sm_rd_bank_q];
+  assign host_rdata = rdata_a[host_rbank_q2];
+  assign sm_rd_data = rdata_a[sm_rd_bank_q2];
 
 endmodule

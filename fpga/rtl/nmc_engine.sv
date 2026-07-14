@@ -147,11 +147,15 @@ module nmc_engine
   // ------------------------------------------------------------------
   // FSM
   // ------------------------------------------------------------------
+  // 2-cycle bank reads (outpost + BRAM register): dense and the wide walk
+  // keep TWO requests in flight (issue c+2 while executing c), the narrow
+  // path gets *_GAP wait states, and priming grows one stage per read.
   typedef enum logic [4:0] {
     E_IDLE, E_CFG, E_DISPATCH,
-    E_DN_PRIME, E_DN_RUN, E_DN_DRAIN,
-    E_SP_IDX_ISSUE, E_SP_IDX_WAIT, E_SP_MUL, E_SP_D_ISSUE, E_SP_D_WAIT,
-    E_SP8_PRIME, E_SP8_PRIME2, E_SP8_NEXT, E_SP8_RUN, E_SP8_DRAIN,
+    E_DN_PRIME, E_DN_PRIME2, E_DN_RUN, E_DN_DRAIN,
+    E_SP_IDX_ISSUE, E_SP_IDX_GAP, E_SP_IDX_WAIT, E_SP_MUL,
+    E_SP_D_ISSUE, E_SP_D_GAP, E_SP_D_WAIT,
+    E_SP8_PRIME, E_SP8_PRIME2, E_SP8_PRIME3, E_SP8_NEXT, E_SP8_RUN, E_SP8_DRAIN,
     E_TREE_CAP, E_TREE0, E_TREE1, E_TREE2, E_TREE_WB,
     E_WG_FLUSH, E_WG_WB,
     E_SM_RUN,
@@ -161,23 +165,24 @@ module nmc_engine
 
   assign engine_busy = (st_q != E_IDLE);
 
-  // dense pipeline registers (exec stage = group issued last cycle)
-  logic [PE_COUNT-1:0] lv_x;
-  logic [BANK_AW-1:0]  woff_x [PE_COUNT];
-  logic [2:0]          wbank_x [PE_COUNT];
-  logic                glast_x;
+  // dense pipeline registers: p = group issued last cycle (data in flight),
+  // x = group issued two cycles ago (data live this cycle — exec stage)
+  logic [PE_COUNT-1:0] lv_p, lv_x;
+  logic [BANK_AW-1:0]  woff_p [PE_COUNT], woff_x [PE_COUNT];
+  logic [2:0]          wbank_p [PE_COUNT], wbank_x [PE_COUNT];
+  logic                glast_p, glast_x;
 
   // sparse pipeline registers (narrow / REDUCTION path)
   logic [2:0]  data_bank_x, b_bank_x, idx_bank_x;
   logic [DATA_WIDTH-1:0] w_q;   // WGATHER row weight B[m]
 
-  // sparse wide-walk exec-stage registers (chunk issued last cycle)
-  logic [PE_COUNT-1:0] lv8_x;
+  // sparse wide-walk chunk pipeline: p = in flight, x = exec (2-cycle reads)
+  logic [PE_COUNT-1:0] lv8_p, lv8_x;
   logic [2:0]          ra_x, rb_x;      // lane→bank rotations (constant per row)
-  logic                clast_x;
-  logic [2:0]          chunk_x;         // accvec chunk index (d = 8*chunk + lane)
-  logic [2:0]          ewb_x [PE_COUNT];   // EMBEDDING per-lane write targets
-  logic [BANK_AW-1:0]  ewo_x [PE_COUNT];
+  logic                clast_p, clast_x;
+  logic [2:0]          chunk_p, chunk_x; // accvec chunk index (d = 8*chunk + lane)
+  logic [2:0]          ewb_p [PE_COUNT], ewb_x [PE_COUNT]; // EMBEDDING targets
+  logic [BANK_AW-1:0]  ewo_p [PE_COUNT], ewo_x [PE_COUNT];
 
   // WGATHER accumulator vector + accumulate pipe: lane-valids/chunk trail the
   // exec stage by 2 cycles to meet the PE's pipelined product (mul_res)
@@ -270,12 +275,14 @@ module nmc_engine
                     ((st_q == E_SP8_RUN) && clast_x && !sp_m_last);
   // Wide-walk row-base pipeline (see scatter_gather_engine.sv): the NEXT row's
   // index word lands in j_nxt_q while the current row walks (idx_arrive), and
-  // the j*stride multiply runs at the row boundary (row_latch). At m == 0 the
-  // E_SP8_NEXT arrival is gated off: idx[1] already arrived in E_SP8_PRIME2
-  // and nothing was issued the cycle before (j_nxt_q must not be clobbered).
-  assign idx_arrive = (st_q == E_SP8_PRIME) || (st_q == E_SP8_PRIME2) ||
+  // the j*stride multiply runs at the row boundary (row_latch). Reads are
+  // 2-cycle now: idx[0]/idx[1] issued in IDX_ISSUE/PRIME arrive in
+  // PRIME2/PRIME3. At m == 0 the E_SP8_NEXT arrival is gated off: idx[1]
+  // already arrived in E_SP8_PRIME3 and nothing was issued two cycles before
+  // (j_nxt_q must not be clobbered).
+  assign idx_arrive = (st_q == E_SP8_PRIME2) || (st_q == E_SP8_PRIME3) ||
                       ((st_q == E_SP8_NEXT) && (sp_m != 16'd0));
-  assign row_latch  = (st_q == E_SP8_PRIME2) ||
+  assign row_latch  = (st_q == E_SP8_PRIME3) ||
                       ((st_q == E_SP8_RUN) && clast_x && !sp_m_last);
   assign red_mul    = (st_q == E_SP_MUL);
 
@@ -312,16 +319,23 @@ module nmc_engine
         end
         step_group = 1'b1;
       end
-      E_DN_RUN: begin
-        // issue group grp_q (if any left)
+      E_DN_PRIME2: begin
+        // second group issued while the first is still in the 2-cycle read
         for (int k = 0; k < PE_COUNT; k++) begin
           eng_raddr_a[k] = dn_offA[k];
           eng_raddr_b[k] = dn_offB[k];
         end
-        step_group = !glast_x;
-        // execute group issued last cycle. ALL dense writes fire from the
-        // registered dnw_* pipe below (1 cycle behind for ADD-family, 2 for
-        // OP_MUL) — a same-cycle BRAM→ALU→BRAM write missed 10 ns.
+        step_group = !glast_p;
+      end
+      E_DN_RUN: begin
+        // issue group grp_q (if any left; two groups stay in flight)
+        for (int k = 0; k < PE_COUNT; k++) begin
+          eng_raddr_a[k] = dn_offA[k];
+          eng_raddr_b[k] = dn_offB[k];
+        end
+        step_group = !glast_p && !glast_x;
+        // execute the group issued two cycles ago. ALL dense writes fire
+        // from the registered dnw_* pipe below.
         for (int p = 0; p < PE_COUNT; p++) begin
           pe_a[p]  = rdata_a[dn_abank[p]];
           pe_b[p]  = rdata_b[dn_bbank[p]];
@@ -335,14 +349,16 @@ module nmc_engine
         eng_raddr_a[sp_idx_bank] = sp_idx_off;
       end
       E_SP8_PRIME: begin
-        // idx[0] is arriving (idx_arrive latches it); issue idx[1] behind it
+        // idx[0] still in flight (2-cycle read); issue idx[1] behind it
         if (!sp_m_last) eng_raddr_a[sp_idx_pf_bank] = sp_idx_pf_off;
       end
       E_SP8_PRIME2: begin
-        // idx[1] is arriving; row 0's base multiply latches this edge
-        // (row_latch). Issue the WGATHER weight B[0] to land in E_SP8_NEXT.
+        // idx[0] arrives this cycle (idx_arrive). Issue the WGATHER weight
+        // B[0] so it lands in E_SP8_NEXT two cycles from now.
         if (b_by_m) eng_raddr_b[sp_b_bank] = sp_b_off;
       end
+      // E_SP8_PRIME3: idx[1] arrives; row 0's base multiply latches this
+      // edge (row_latch reads the pre-update j_nxt_q). No port activity.
       E_SP_D_ISSUE: begin
         eng_raddr_a[sp_data_bank] = sp_data_off;
         if (!b_by_m) eng_raddr_b[sp_b_bank] = sp_b_off;  // SPARSE operand B[d]
@@ -371,22 +387,22 @@ module nmc_engine
         step_chunk = 1'b1;
       end
       E_SP8_RUN: begin
-        if (!clast_x) begin
-          // issue chunk chk_q while executing the previous one
+        if (!clast_p && !clast_x) begin
+          // issue chunk chk_q while two earlier chunks are in flight/exec
           for (int k = 0; k < PE_COUNT; k++) begin
             eng_raddr_a[k] = sp8_offA[k];
             if (c_q.cmd_op == CMD_SPARSE) eng_raddr_b[k] = sp8_offB[k];
           end
           step_chunk = 1'b1;
-        end else begin
-          // final walk cycle: the issue ports are idle — prefetch the index
-          // TWO rows ahead (idx[m+2]; row_latch resolves idx[m+1]'s base this
-          // edge) and the next row's weight for WGATHER
+        end else if (clast_p) begin
+          // first idle-issue cycle (last chunk is in flight) — prefetch the
+          // index TWO rows ahead (arrives exactly at the next E_SP8_NEXT with
+          // 2-cycle reads) and the next row's weight for WGATHER
           if (sp_idx_pf2_v) eng_raddr_a[sp_idx_pf2_bank] = sp_idx_pf2_off;
           if (!sp_m_last && b_by_m) eng_raddr_b[sp_b_pf_bank] = sp_b_pf_off;
         end
-        // execute the chunk issued last cycle (EMBEDDING writes fire from the
-        // registered emw_* pipe below, 1 cycle behind)
+        // execute the chunk issued two cycles ago (EMBEDDING writes fire from
+        // the registered emw_* pipe below)
         for (int p = 0; p < PE_COUNT; p++) begin
           pe_a[p]   = rdata_a[(ra_x + 3'(p)) & 3'h7];
           pe_b[p]   = (c_q.cmd_op == CMD_SPARSE) ? rdata_b[(rb_x + 3'(p)) & 3'h7]
@@ -489,9 +505,10 @@ module nmc_engine
       acc_rst_q <= 1'b0;
       sm_start <= 1'b0; sm_src <= '0; sm_dst <= '0; sm_len <= '0;
       error_q <= 1'b0; error_code_q <= ERR_NONE;
-      lv_x <= '0; glast_x <= 1'b0;
+      lv_p <= '0; glast_p <= 1'b0; lv_x <= '0; glast_x <= 1'b0;
       data_bank_x <= '0; b_bank_x <= '0; idx_bank_x <= '0;
       w_q <= '0; wg_d_q <= '0;
+      lv8_p <= '0; clast_p <= 1'b0; chunk_p <= '0;
       lv8_x <= '0; ra_x <= '0; rb_x <= '0; clast_x <= 1'b0; chunk_x <= '0;
       tr1 <= '0;
       for (int i = 0; i < 4; i++) tr4[i] <= '0;
@@ -513,7 +530,9 @@ module nmc_engine
       emw_v_y <= '0; emw_v_z <= '0; wgw_v_y <= '0;
       drain_q <= '0;
       for (int i = 0; i < PE_COUNT; i++) begin
+        woff_p[i] <= '0; wbank_p[i] <= '0;
         woff_x[i] <= '0; wbank_x[i] <= '0;
+        ewb_p[i] <= '0; ewo_p[i] <= '0;
         ewb_x[i] <= '0; ewo_x[i] <= '0;
         dnw_bank_y[i] <= '0; dnw_bank_z[i] <= '0; dnw_bank_w[i] <= '0;
         dnw_off_y[i] <= '0; dnw_off_z[i] <= '0; dnw_off_w[i] <= '0;
@@ -647,26 +666,59 @@ module nmc_engine
 
         // ---------------- dense ----------------
         E_DN_PRIME: begin
-          lv_x    <= dn_lane_valid;
-          glast_x <= dn_group_last;
+          lv_p    <= dn_lane_valid;
+          glast_p <= dn_group_last;
           for (int p = 0; p < PE_COUNT; p++) begin
-            woff_x[p]  <= dn_woff[p];
-            wbank_x[p] <= dn_wbank[p];
+            woff_p[p]  <= dn_woff[p];
+            wbank_p[p] <= dn_wbank[p];
+          end
+          st_q <= E_DN_PRIME2;
+        end
+        E_DN_PRIME2: begin
+          // group 0 advances to the exec stage; group 1 (if any) enters the
+          // in-flight stage — two 2-cycle reads now outstanding
+          lv_x    <= lv_p;
+          glast_x <= glast_p;
+          for (int p = 0; p < PE_COUNT; p++) begin
+            woff_x[p]  <= woff_p[p];
+            wbank_x[p] <= wbank_p[p];
+          end
+          if (!glast_p) begin
+            lv_p    <= dn_lane_valid;
+            glast_p <= dn_group_last;
+            for (int p = 0; p < PE_COUNT; p++) begin
+              woff_p[p]  <= dn_woff[p];
+              wbank_p[p] <= dn_wbank[p];
+            end
+          end else begin
+            lv_p    <= '0;
+            glast_p <= 1'b0;
           end
           st_q <= E_DN_RUN;
         end
         E_DN_RUN: begin
           if (glast_x) begin
-            // 2-cycle drain: the last group's products (OP_MUL writes /
-            // MACC accumulates) are still in the PE multiply pipe
+            // drain: the last group's products (OP_MUL writes / MACC
+            // accumulates) are still in the PE multiply pipe
             drain_q <= '0;
             st_q <= E_DN_DRAIN;
           end else begin
-            lv_x    <= dn_lane_valid;
-            glast_x <= dn_group_last;
+            lv_x    <= lv_p;
+            glast_x <= glast_p;
             for (int p = 0; p < PE_COUNT; p++) begin
-              woff_x[p]  <= dn_woff[p];
-              wbank_x[p] <= dn_wbank[p];
+              woff_x[p]  <= woff_p[p];
+              wbank_x[p] <= wbank_p[p];
+            end
+            if (!glast_p) begin
+              lv_p    <= dn_lane_valid;
+              glast_p <= dn_group_last;
+              for (int p = 0; p < PE_COUNT; p++) begin
+                woff_p[p]  <= dn_woff[p];
+                wbank_p[p] <= dn_wbank[p];
+              end
+            end else begin
+              lv_p    <= '0;
+              glast_p <= 1'b0;
             end
           end
         end
@@ -680,8 +732,9 @@ module nmc_engine
         // ---------------- sparse ----------------
         E_SP_IDX_ISSUE: begin
           idx_bank_x <= sp_idx_bank;
-          st_q <= (c_q.cmd_op == CMD_REDUCTION) ? E_SP_IDX_WAIT : E_SP8_PRIME;
+          st_q <= (c_q.cmd_op == CMD_REDUCTION) ? E_SP_IDX_GAP : E_SP8_PRIME;
         end
+        E_SP_IDX_GAP: st_q <= E_SP_IDX_WAIT;   // 2-cycle read in flight
         E_SP_IDX_WAIT: begin
           // (REDUCTION only) SG latches j + mask this edge (step_idx comb)
           st_q <= E_SP_MUL;
@@ -693,17 +746,23 @@ module nmc_engine
         end
 
         // -- wide-walk priming: park idx[0] and idx[1] in the SG's index
-        //    pipeline so every row base is a registered multiply
+        //    pipeline so every row base is a registered multiply. Reads take
+        //    2 cycles: idx[0] (issued in IDX_ISSUE) arrives in PRIME2, idx[1]
+        //    (issued in PRIME) arrives in PRIME3.
         E_SP8_PRIME: begin
-          // idx[0] lands in j_nxt_q this edge (idx_arrive); idx[1] issuing
-          idx_bank_x <= sp_idx_pf_bank;
+          // idx[0] in flight; idx[1] issuing this cycle
           st_q <= E_SP8_PRIME2;
         end
         E_SP8_PRIME2: begin
+          // idx[0] lands in j_nxt_q this edge (idx_arrive); WGATHER weight
+          // B[0] issuing on port B; switch the idx read mux to idx[1]'s bank
+          idx_bank_x <= sp_idx_pf_bank;
+          b_bank_x   <= sp_b_bank;
+          st_q <= E_SP8_PRIME3;
+        end
+        E_SP8_PRIME3: begin
           // row 0's base latches this edge (row_latch reads j_nxt_q = idx[0]
-          // before idx_arrive overwrites it with idx[1] — nonblocking);
-          // WGATHER weight B[0] issuing on port B
-          b_bank_x <= sp_b_bank;
+          // before idx_arrive overwrites it with idx[1] — nonblocking)
           st_q <= E_SP8_NEXT;
         end
 
@@ -711,8 +770,9 @@ module nmc_engine
         //    per-index addresses could collide on a bank if fetched 8-wide)
         E_SP_D_ISSUE: begin
           data_bank_x <= sp_data_bank;
-          st_q <= E_SP_D_WAIT;
+          st_q <= E_SP_D_GAP;
         end
+        E_SP_D_GAP: st_q <= E_SP_D_WAIT;   // 2-cycle read in flight
         E_SP_D_WAIT: begin
           if (!sp_d_last) begin
             st_q <= E_SP_D_ISSUE;                 // step_d advances combinationally
@@ -729,36 +789,51 @@ module nmc_engine
         //    runs pipelined behind the next row's walk.
         E_SP8_NEXT: begin
           if (b_by_m) w_q <= rdata_b[b_bank_x];   // prefetched weight B[m]
-          lv8_x   <= sp8_lane_valid;
-          ra_x    <= sp8_arot;
+          ra_x    <= sp8_arot;                    // row-constant rotations
           rb_x    <= sp8_brot;
-          clast_x <= sp8_chunk_last;
-          chunk_x <= 3'd0;
+          // chunk 0 enters the in-flight stage; exec stage bubbles while the
+          // 2-cycle read completes
+          lv8_p   <= sp8_lane_valid;
+          clast_p <= sp8_chunk_last;
+          chunk_p <= 3'd0;
           for (int p = 0; p < PE_COUNT; p++) begin
-            ewb_x[p] <= sp8_wbank[p];
-            ewo_x[p] <= sp8_woff[p];
+            ewb_p[p] <= sp8_wbank[p];
+            ewo_p[p] <= sp8_woff[p];
           end
+          lv8_x   <= '0;
+          clast_x <= 1'b0;
           st_q <= E_SP8_RUN;
         end
         E_SP8_RUN: begin
-          // (WGATHER accvec accumulate moved to the unconditional wg_* pipe
-          // above — products emerge from the PE pipe 2 cycles after exec)
-          if (!clast_x) begin
-            // exec regs for the chunk being issued this cycle
-            lv8_x   <= sp8_lane_valid;
-            clast_x <= sp8_chunk_last;
-            chunk_x <= chunk_x + 3'd1;
+          // (WGATHER accvec accumulate lives in the unconditional wg_* pipe
+          // above — products emerge from the PE pipe 3 cycles after exec)
+          // in-flight → exec advance, every cycle
+          lv8_x   <= lv8_p;
+          clast_x <= clast_p;
+          chunk_x <= chunk_p;
+          for (int p = 0; p < PE_COUNT; p++) begin
+            ewb_x[p] <= ewb_p[p];
+            ewo_x[p] <= ewo_p[p];
+          end
+          if (!clast_p && !clast_x) begin
+            // in-flight regs for the chunk being issued this cycle
+            lv8_p   <= sp8_lane_valid;
+            clast_p <= sp8_chunk_last;
+            chunk_p <= chunk_p + 3'd1;
             for (int p = 0; p < PE_COUNT; p++) begin
-              ewb_x[p] <= sp8_wbank[p];
-              ewo_x[p] <= sp8_woff[p];
+              ewb_p[p] <= sp8_wbank[p];
+              ewo_p[p] <= sp8_woff[p];
             end
           end else begin
+            lv8_p   <= '0;
+            clast_p <= 1'b0;
+          end
+          if (clast_x) begin
             // row boundary: the final chunk's operands entered the PE pipe at
-            // this edge — its product is 2 cycles out, so the tree snapshot is
-            // staged through pend0 (reads acc_out_eff one cycle later).
-            // Capture the writeback target before step_m advances m; latch the
-            // prefetch banks (idx[m+2] is issuing; row_latch resolves
-            // idx[m+1]'s base this edge).
+            // this edge — the tree snapshot is staged through pend0/pend0b.
+            // Capture the writeback target before step_m advances m; latch
+            // the prefetch banks (idx[m+2] was issued last cycle and lands at
+            // the next E_SP8_NEXT; row_latch resolves idx[m+1]'s base now).
             if (c_q.cmd_op == CMD_SPARSE) begin
               pend0_v    <= 1'b1;
               pend0_bank <= sp_out_wbank;
@@ -769,8 +844,8 @@ module nmc_engine
             drain_q    <= '0;
             unique case (c_q.cmd_op)
               CMD_SPARSE:  st_q <= sp_m_last ? E_SP8_DRAIN : E_SP8_NEXT;
-              // WGATHER and EMBEDDING both need the 2-cycle flush: the last
-              // chunk's products/writes are still in the registered pipes
+              // WGATHER and EMBEDDING both need the flush: the last chunk's
+              // products/writes are still in the registered pipes
               default:     st_q <= sp_m_last ? E_WG_FLUSH  : E_SP8_NEXT;
             endcase                               // step_m combinational
           end

@@ -53,11 +53,13 @@ module softmax_unit
   always_ff @(posedge clk) rom_q <= exp_rom[k_q];
 
   // ---------------- FSM ----------------
+  // *_GAP states: bank reads are 2-cycle (outpost register + BRAM register),
+  // so each issue gets one extra wait before the data-capture state
   typedef enum logic [4:0] {
-    S_IDLE, S_MX_ISSUE, S_MX_WAIT, S_MX_CMP,
-    S_P1_ISSUE, S_P1_WAIT, S_P1_SUB, S_P1_IDX, S_P1_LUT, S_P1_MUL, S_P1_ADD,
-    S_P1_WRITE,
-    S_P2_ISSUE, S_P2_WAIT, S_DIV, S_P2_WRITE, S_DONE
+    S_IDLE, S_MX_ISSUE, S_MX_GAP, S_MX_WAIT, S_MX_CMP,
+    S_P1_ISSUE, S_P1_GAP, S_P1_WAIT, S_P1_SUB, S_P1_IDX, S_P1_LUT, S_P1_MUL,
+    S_P1_ADD, S_P1_WRITE,
+    S_P2_ISSUE, S_P2_GAP, S_P2_WAIT, S_DIV, S_P2_WRITE, S_DONE
   } state_e;
   state_e st_q;
 
@@ -171,7 +173,8 @@ module softmax_unit
             st_q <= (sm_len == 0) ? S_DONE : S_MX_ISSUE;
           end
         end
-        S_MX_ISSUE: st_q <= S_MX_WAIT;
+        S_MX_ISSUE: st_q <= S_MX_GAP;
+        S_MX_GAP:   st_q <= S_MX_WAIT;
         S_MX_WAIT: begin
           rd_cap_q <= rd_data;    // capture only; compare runs from registers
           st_q     <= S_MX_CMP;
@@ -186,7 +189,8 @@ module softmax_unit
             st_q <= S_MX_ISSUE;
           end
         end
-        S_P1_ISSUE: st_q <= S_P1_WAIT;
+        S_P1_ISSUE: st_q <= S_P1_GAP;
+        S_P1_GAP:   st_q <= S_P1_WAIT;
         S_P1_WAIT: begin
           rd_cap_q <= rd_data;    // capture only
           st_q     <= S_P1_SUB;
@@ -226,7 +230,8 @@ module softmax_unit
             st_q <= S_P1_ISSUE;
           end
         end
-        S_P2_ISSUE: st_q <= S_P2_WAIT;
+        S_P2_ISSUE: st_q <= S_P2_GAP;
+        S_P2_GAP:   st_q <= S_P2_WAIT;
         S_P2_WAIT: begin
           // start division: (exp << 16) / sum
           div_num_q <= {16'd0, rd_data, 16'd0};

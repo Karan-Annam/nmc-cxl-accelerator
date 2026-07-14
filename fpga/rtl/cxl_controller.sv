@@ -92,11 +92,18 @@ module cxl_controller
   assign host_rbank = bank_of(hdm_addr);
   assign host_roff  = off_of(hdm_addr);
 
+  logic hdm_rv1;
   always_ff @(posedge clk or negedge rst_n) begin
-    if (!rst_n) hdm_rvalid <= 1'b0;
-    else        hdm_rvalid <= hdm_rd_fire;
+    if (!rst_n) begin
+      hdm_rv1    <= 1'b0;
+      hdm_rvalid <= 1'b0;
+    end else begin
+      hdm_rv1    <= hdm_rd_fire;
+      hdm_rvalid <= hdm_rv1;
+    end
   end
-  assign hdm_rdata = host_rdata;   // valid the cycle after the read fires
+  assign hdm_rdata = host_rdata;   // valid TWO cycles after the read fires
+                                   // (bank outpost register + BRAM register)
 
   assign cxl_rd_inc = hdm_rd_fire;
   assign cxl_wr_inc = hdm_wr_fire;

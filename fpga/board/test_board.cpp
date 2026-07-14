@@ -114,19 +114,25 @@ int main(int argc, char** argv) {
     int expect_dev_seq = 0;
     bool seq_ok = true, crc_ok_all = true;
 
-    auto harvest = [&](int frames, uint32_t want_tag, uint32_t* got) {
-        for (int i = 0; i < frames; i++) {
+    // harvest device frames until the tagged response shows up (ctrl-only
+    // ack/credit frames in between are counted but carry no response)
+    auto harvest = [&](uint32_t want_tag, uint32_t* got) {
+        for (int i = 0; i < 8; i++) {
             CxlFlit rf;
             if (!next_frame(rf, 400000)) return;
             crc_ok_all = crc_ok_all && rf.crc_ok();
             seq_ok = seq_ok && (rf.seq() == (expect_dev_seq & 0xF));
             expect_dev_seq++;
+            bool found = false;
             for (int s = 0; s < SLOTS_PER_FLIT; s++) {
                 uint8_t t = rf.slot_type(s);
                 if ((t == SLOT_IO || t == SLOT_MEM) && (rf.slot_word(s, 0) & 0x40000000u) &&
-                    ((rf.slot_word(s, 0) >> 16) & 0xFF) == want_tag)
+                    ((rf.slot_word(s, 0) >> 16) & 0xFF) == want_tag) {
                     *got = rf.slot_word(s, 1);
+                    found = true;
+                }
             }
+            if (found) return;
         }
     };
 
@@ -137,7 +143,7 @@ int main(int argc, char** argv) {
     f1.set_slot_word(1, 0, uint32_t(REG_DEVICE_ID) | (0x42u << 16));
     send_flit(f1, seq++);
     uint32_t id = 0;
-    harvest(2, 0x42, &id);
+    harvest(0x42, &id);
     CHECKB(id == 0xCA550001u, "DEVICE_ID != 0xCA550001");
 
     // 2. HDM write then readback (tag 0x43)
@@ -152,7 +158,7 @@ int main(int argc, char** argv) {
     f3.set_slot_word(1, 0, 100u | (0x43u << 16));
     send_flit(f3, seq++);
     uint32_t rd = 0;
-    harvest(3, 0x43, &rd);
+    harvest(0x43, &rd);
     CHECKB(rd == 0xDEADBEEFu, "HDM readback != 0xDEADBEEF");
 
     CHECKB(crc_ok_all, "a device flit failed the host CRC check");
