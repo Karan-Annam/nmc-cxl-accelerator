@@ -24,6 +24,7 @@ void CxlHostModel::process_rx(const CxlFlit& f) {
     expected_rx_seq_ = uint8_t((expected_rx_seq_ + 1) & 0xF);
     last_dev_seq     = f.seq();
     last_rx          = f;
+    rx_flit_q.push_back(f);
     stat_flits_rcvd++;
     rcvd_since_ack_++;
 
@@ -123,13 +124,18 @@ void CxlHostModel::send_flit(CxlFlit& f, bool consume_credits, int io_slots,
 }
 
 bool CxlHostModel::recv_flit(CxlFlit& f, uint32_t max_cycles) {
-    uint32_t before = stat_flits_rcvd;
     for (uint32_t c = 0; c < max_cycles; c++) {
-        pump(1);
-        if (stat_flits_rcvd != before) {
-            f = last_rx;
+        if (!rx_flit_q.empty()) {
+            f = rx_flit_q.front();
+            rx_flit_q.pop_front();
             return true;
         }
+        pump(1);
+    }
+    if (!rx_flit_q.empty()) {
+        f = rx_flit_q.front();
+        rx_flit_q.pop_front();
+        return true;
     }
     return false;
 }
@@ -171,6 +177,9 @@ std::vector<uint32_t> CxlHostModel::wait_response_vec(uint8_t tag, uint32_t time
         if (it != responses_.end()) {
             std::vector<uint32_t> v = std::move(it->second);
             responses_.erase(it);
+            // this transaction owns every flit up to its completion: drain
+            // them so later raw recv_flit() callers see only newer flits
+            rx_flit_q.clear();
             return v;
         }
         pump(1);

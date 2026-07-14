@@ -166,6 +166,11 @@ class CxlHostModel {
     int      io_credits  = INIT_CREDITS;
     int      mem_credits = INIT_CREDITS;
     CxlFlit  last_rx;                  // last good device flit (raw)
+    std::deque<CxlFlit> rx_flit_q;     // good device flits not yet handed to a
+                                       // recv_flit() caller — flits can arrive
+                                       // during nested pumps (auto-acks,
+                                       // send_flit ready-waits) and must not
+                                       // be lost to last_rx overwrites
     uint8_t  last_dev_seq = 0xFF;      // latest good device seq (0xFF = none yet)
 
   private:

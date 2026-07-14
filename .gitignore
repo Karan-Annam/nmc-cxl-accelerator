@@ -5,3 +5,9 @@ build/
 # waveforms / logs
 *.vcd
 *.log
+
+# vivado / board sim outputs
+obj_board/
+.Xil/
+*.jou
+*.str

@@ -13,11 +13,14 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
 mkdir -p build
 
-RTL="rtl/nmc_pkg.sv rtl/sram_bank.sv rtl/configurable_pe.sv rtl/config_regfile.sv \
-     rtl/perf_counters.sv rtl/cxl_crc16.sv rtl/cxl_flit_pack.sv rtl/cxl_flit_unpack.sv \
-     rtl/cxl_credit_ctrl.sv rtl/cxl_retry_buffer.sv rtl/cxl_arb_mux.sv \
-     rtl/cxl_link_perf.sv rtl/cxl_link_layer.sv rtl/cxl_controller.sv rtl/scatter_gather_engine.sv \
-     rtl/softmax_unit.sv rtl/nmc_engine.sv rtl/nmc_top.sv"
+# RTL_DIR selects the source tree: fpga/rtl (default, timing-closed working RTL)
+# or sim_rtl (frozen sim-first baseline) — e.g. RTL_DIR=sim_rtl make sim
+RTL_DIR="${RTL_DIR:-fpga/rtl}"
+RTL="$RTL_DIR/nmc_pkg.sv $RTL_DIR/sram_bank.sv $RTL_DIR/configurable_pe.sv $RTL_DIR/config_regfile.sv \
+     $RTL_DIR/perf_counters.sv $RTL_DIR/cxl_crc16.sv $RTL_DIR/cxl_flit_pack.sv $RTL_DIR/cxl_flit_unpack.sv \
+     $RTL_DIR/cxl_credit_ctrl.sv $RTL_DIR/cxl_retry_buffer.sv $RTL_DIR/cxl_arb_mux.sv \
+     $RTL_DIR/cxl_link_perf.sv $RTL_DIR/cxl_link_layer.sv $RTL_DIR/cxl_controller.sv $RTL_DIR/scatter_gather_engine.sv \
+     $RTL_DIR/softmax_unit.sv $RTL_DIR/nmc_engine.sv $RTL_DIR/nmc_top.sv"
 
 TESTS=$(ls sim/tests/*.cpp 2>/dev/null | tr '\n' ' ')
 

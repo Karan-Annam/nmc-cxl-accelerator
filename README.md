@@ -48,18 +48,18 @@ Two pieces I'm proud of:
 Attention output lands within 0.13% of a double-precision reference; the
 fixed-point softmax within 3×10⁻⁵ in range and 1.2×10⁻⁴ for logits far outside
 the exp table (a max-subtraction pass makes it exact for any magnitude). Both
-dense and sparse modes sustain ~7-7.8 elements/cycle on 8 PEs — the sparse row
-walk gathers 8-wide across the banks with the next row's index prefetched and
-the reduction tree pipelined behind the walk. Every one of those words crossed
+dense and sparse modes sustain ~7-7.6 elements/cycle on 8 PEs — the sparse row
+walk gathers 8-wide across the banks with the index list prefetched two rows
+ahead and the reduction tree pipelined behind the walk. Every one of those words crossed
 the simulated boundary inside a CRC-protected, credit-gated, retry-buffered
 flit. The flit framing itself costs 5.9% overhead; burst slots pack 3
 sequential words into each 16-byte slot (30 writes: 4 flits instead of 30),
-and host reads dispatch pipelined at 1 word/cycle on the device.
+and host reads dispatch pipelined at ~1.8 cycles/word on the device.
 
 Each perf test also reports a **control-inclusive** variant that charges every
 CXL.io command/config/status slot against the NMC side (the analytic baselines
 carry no control term). It keeps the headline honest — and it surfaced a real
-architectural lesson: attention (3 commands per query) keeps a 1.9× win even
+architectural lesson: attention (3 commands per query) keeps a 2.2× win even
 with control counted, but GNN's one-command-per-node-per-channel style drowns
 in MMIO traffic (0.11×). Fine-grained offload needs command batching; that is
 future work and the number that says so is in the results, not hidden.
@@ -72,11 +72,13 @@ watch the CRC/NAK/retry dance.
 ## Quick start
 
 ```bash
-make sim                       # verilate + build + run all 25 tests
+make sim                       # verilate + build + run all 25 tests (fpga/rtl)
 make test T=test_flit_retry    # one test
 make wave                      # + VCD at build/waves.vcd
 make lint                      # zero warnings
 make results                   # refresh docs/results.json + re-embed dashboard
+make fpga                      # Vivado OOC synth @ 100 MHz + timing reports
+RTL_DIR=sim_rtl make sim       # run the suite on the frozen pre-timing RTL
 ```
 
 Needs Verilator 5.x and a C++17 g++. On Windows/MSYS2 read
@@ -88,21 +90,30 @@ silently.
 ```
 sim/cxl_host_model.*      C++ host: packs/unpacks flits, golden CRC, credits, acks
         │ 544-bit flit ports (the ONLY external interface)
-rtl/cxl_link_layer.sv     CRC check → per-protocol rx queues → dispatchers
+fpga/rtl/cxl_link_layer.sv     CRC check → per-protocol rx queues → dispatchers
   ├ flit pack/unpack, crc16, arb_mux, credit_ctrl, retry_buffer
-rtl/cxl_controller.sv     MMIO register map + HDM arbiter (host vs engine)
-rtl/nmc_engine.sv         FSM, operand routing, accumulation, pipelined reduction tree
+fpga/rtl/cxl_controller.sv     MMIO register map + HDM arbiter (host vs engine)
+fpga/rtl/nmc_engine.sv         FSM, operand routing, accumulation, pipelined reduction tree
   ├ scatter_gather_engine.sv    all address math (dense lanes + 8-wide sparse row walk)
   ├ configurable_pe.sv ×8       16-op ALU + accumulator, 7-bit runtime config
-  └ softmax_unit.sv             max-scan + exp LUT + serial divider, three passes
-rtl/sram_bank.sv ×8       dual-read-port banks; word A lives in bank A%8
+  └ softmax_unit.sv             max-scan + pipelined exp ROM + serial divider, 3 passes
+fpga/rtl/sram_bank.sv ×8       dual-read-port banks; word A lives in bank A%8
 ```
+
+`fpga/rtl/` is the working, timing-closed RTL (100 MHz on a Spartan-7 xc7s50,
+out-of-context synthesis — see [fpga/](fpga/)); `sim_rtl/` preserves the
+original sim-first RTL, whose worst path missed that clock by ~16 ns, for
+before/after comparison.
 
 The full walkthrough (data flow for one attention query, the design decisions
 worth knowing: the 8-wide conflict-free sparse row walk, the asymmetric retry
 buffer, the Q8.8 fixed-point trick, the CXL.io/CXL.mem ordering hazard, and
 the exact semantics of all six opcodes) is in
 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
+
+Deeper documentation: [docs/TECH_DEEP_DIVE.md](docs/TECH_DEEP_DIVE.md) (flit
+format, 8-wide walk, softmax numerics, ordering hazard, every measured
+number) and [docs/STATE_AND_ROADMAP.md](docs/STATE_AND_ROADMAP.md).
 
 ## Honest scope
 

@@ -21,22 +21,22 @@ the analog PHY is out of scope.
 ```
 sim/cxl_host_model.*      C++ host: packs/unpacks flits, golden CRC, credits, acks
         │ 544-bit flit ports (the ONLY external interface of nmc_top)
-rtl/cxl_link_layer.sv     CRC check → per-protocol rx queues → dispatchers
+fpga/rtl/cxl_link_layer.sv     CRC check → per-protocol rx queues → dispatchers
   ├ cxl_flit_pack/unpack  byte layout, header fields, CRC placement
   ├ cxl_crc16             CRC-16-CCITT over bytes 0..65
   ├ cxl_arb_mux           response FIFOs + round-robin slot packing (≤4/flit)
   ├ cxl_credit_ctrl       request-direction credit returns
   └ cxl_retry_buffer      8-deep go-back-N replay of device tx flits
         │ mmio_* / hdm_* (cxl_controller cannot tell flits exist)
-rtl/cxl_controller.sv     MMIO register map + HDM arbiter (host vs engine)
+fpga/rtl/cxl_controller.sv     MMIO register map + HDM arbiter (host vs engine)
         │ cmd / cfg / done
-rtl/nmc_engine.sv         FSM, operand routing, accumulation, reduction tree
-  ├ rtl/scatter_gather_engine.sv   ALL address math (dense lanes + sparse indirection)
-  ├ rtl/configurable_pe.sv × 8     16-op ALU + accumulator, 7-bit runtime config
-  ├ rtl/config_regfile.sv          8×7b config, persists across commands
-  └ rtl/softmax_unit.sv            exp LUT + serial divider, two passes
-rtl/sram_bank.sv × 8      dual-read-port banks; word A lives in bank A%8 at A/8
-rtl/perf_counters.sv      CXL word transactions (the research metric) + bookkeeping
+fpga/rtl/nmc_engine.sv         FSM, operand routing, accumulation, reduction tree
+  ├ fpga/rtl/scatter_gather_engine.sv   ALL address math (dense lanes + sparse indirection)
+  ├ fpga/rtl/configurable_pe.sv × 8     16-op ALU + accumulator, 7-bit runtime config
+  ├ fpga/rtl/config_regfile.sv          8×7b config, persists across commands
+  └ fpga/rtl/softmax_unit.sv            pipelined exp ROM + serial divider, 3 passes
+fpga/rtl/sram_bank.sv × 8      dual-read-port banks; word A lives in bank A%8 at A/8
+fpga/rtl/perf_counters.sv      CXL word transactions (the research metric) + bookkeeping
 ```
 
 ## How a sparse attention query flows
@@ -47,18 +47,20 @@ rtl/perf_counters.sv      CXL word transactions (the research metric) + bookkeep
 2. **Scores:** host submits `CMD_SPARSE` (src_a=K, src_b=Q, idx list, stride=d_k).
    For each index m the SG engine walks the row **8 elements per cycle**: all 8
    banks serve `K[j·d_k + 8c+p]` on their A ports and `Q[8c+p]` on their B ports
-   simultaneously, each PE running MACC on its lane. The next row's index is
-   prefetched during the current row's final walk cycle, chunk 0 issues in the
-   same cycle the index word lands (an address bypass in the SG engine), and a
-   3-stage *pipelined* tree folds the 8 partial accumulators into `scores[m]`
-   while row m+1 is already gathering. Steady state: ⌈d_k/8⌉+1 cycles per row
-   (~7.1 elements/cycle at d_k=64).
+   simultaneously, each PE running MACC on its lane. The index list is
+   prefetched two rows ahead in the row-end bubble — the next row's index sits
+   in a register a full row early, its `j·stride` base multiply runs registered
+   at the row boundary (a timing-closure requirement at 100 MHz), and chunk 0
+   still issues on the row's first cycle. A 3-stage *pipelined* tree folds the
+   8 partial accumulators into `scores[m]` while row m+1 is already gathering.
+   Steady state: ⌈d_k/8⌉+1 cycles per row (~7.0 elements/cycle at d_k=64).
 3. **Softmax:** `CMD_SOFTMAX` hands the memory ports to the softmax unit: pass 0
    scans the running maximum (numeric stability — softmax is shift-invariant, so
    subtracting it costs nothing and makes any logit magnitude exact); pass 1
-   computes exp(x−max) via a 256-entry Q16.16 LUT with linear interpolation and
-   accumulates the 48-bit sum; pass 2 divides each exp by the sum with a serial
-   restoring divider.
+   computes exp(x−max) via a 256-entry Q16.16 ROM with linear interpolation
+   (a 4-stage pipeline: index → sync ROM read → delta×frac DSP → interpolate)
+   and accumulates the 48-bit sum; pass 2 divides each exp by the sum with a
+   serial restoring divider.
 4. **Output:** `CMD_WGATHER` gathers `V[idx[m]][d]`, multiplies by `weights[m]`
    (mask-gated through the PE), and accumulates into a 64-entry vector register file,
    then writes the d_k-word result.
@@ -89,7 +91,7 @@ rtl/perf_counters.sv      CXL word transactions (the research metric) + bookkeep
   of per-protocol queueing, not bugs in it.
 - **Control traffic is measured, not ignored.** Every perf test reports a
   ctrl-inclusive reduction charging CXL.io slots against the NMC side.
-  Attention (3 commands/query) keeps 1.9× with control counted; GNN's
+  Attention (3 commands/query) keeps 2.2× with control counted; GNN's
   command-per-(node,channel) style drops to 0.11× — fine-grained offload needs
   command batching, and the metric exists precisely to say so out loud.
 - **PE mask gate does all masking.** A masked index entry zeroes the PE result and
