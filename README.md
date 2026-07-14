@@ -116,5 +116,7 @@ for the PCIe hard IP's BAR interface and keep the whole compute side unchanged.
 
 ## AI Use and Tooling
 
-These docs were drafted with AI assistance and edited by me. Code-level AI
-use and the build toolchain are in [TOOLING.md](TOOLING.md).
+AI-assisted tools were used for implementation support, debugging, and
+documentation. I reviewed and modified the resulting RTL and C++ host-model
+code and validated the current design with the documented simulation and FPGA
+build flows. Build details and development notes are in [TOOLING.md](TOOLING.md).

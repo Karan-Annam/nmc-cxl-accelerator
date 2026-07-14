@@ -13,9 +13,8 @@ Host quirks (MSYS2 PATH ordering, the broken Perl `verilator` wrapper) are in
 
 ## AI use
 
-I wrote the RTL with AI assistance, then debugged it myself and read through
-it to modify things, the scatter/gather engine's timing needed more than one
-pass to get right once it was running against the flit model instead of
-just compiling clean.
-
-Ask about the scatter/gather engine, the flit layer, or anything else here.
+AI-assisted tools were used for implementation support, debugging, and
+documentation. I reviewed and modified the resulting RTL and C++ host model
+and validated them with the documented simulation and FPGA build flows. The
+scatter/gather engine and its flit-model integration required several
+debugging and timing iterations.
