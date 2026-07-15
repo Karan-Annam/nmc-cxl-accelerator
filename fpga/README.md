@@ -67,7 +67,7 @@ launch directory at elaboration.
 | `make fpga150` — Arty (OOC synth) | xc7a100t | 6.667 ns | −1.07 (port-model artifacts only) |
 | `make bitstream` — Arty (routed) | xc7a100t | 11.11 ns (90 MHz) | see `build/timing_route.rpt` |
 
-### Why the board runs at 90 MHz, not 150 (the routed-ceiling finding)
+### The routed ceiling, and what Tier 1 bought
 
 The core LOGIC closes 6.67 ns in out-of-context synthesis after deep
 pipelining (3-stage multiplies, closed-form arb selection, capture-first
@@ -78,13 +78,21 @@ column of the die, that distribution is **~9 ns of wire with only ~1.2 ns of
 logic on it** (measured on the routed netlist: worst path 10.5 ns, 88%
 route). No local pipelining fixes wire — the registers themselves must move.
 
-The measured routed Fmax is ~90 MHz: 100 MHz builds land at WNS −0.75 to
-−0.94, and the shipped 90 MHz bitstream lands at **−0.124 ns over 19
-endpoints** (TNS −1.0) — a placement-lottery whisker inside the tools' own
-margin, fine on a bench, but not formally closed. Two known finishes if
-formal closure matters: re-run `make bitstream` (runs vary ±0.2 ns), or
-register the OP_MUL write data one more stage (dnw_data_w, +1 drain cycle) —
-the worst path is the DSP-output → far-bank write-data wire. Raising the board clock therefore requires an architectural
+**Tier 1 (this branch): per-bank outpost registers.** Every bank's
+address/write inputs land in registers placeable beside its BRAMs — the
+memory contract became 2-cycle reads, all six consumers re-pipelined
+(dense and the wide walk keep two requests in flight; narrow paths gained
+wait states). Measured effect: routed Fmax **~90 → ~112 MHz**; the board
+ships at 105.88 MHz (MMCM 9.0/8.5). Cost: sparse 7.03 → 6.33 elems/cycle
+(floor 6.0 holds), dense 135 → 136 cycles.
+
+The NEXT wall (measured on the 150 MHz attempt: worst path 8.9 ns, 65%
+route) is the **read-return crossing**: bank DO → lane-rotation mux → PE
+operand registers still crosses the die once. Fixing it needs a registered
+return crossbar (3-cycle reads) — but naively that adds another trailing
+exec cycle per row and breaks the 6.0 elems/cycle floor, so it must come
+with an issue-continuous walk (rows packed at issue rate). Tracked on the
+roadmap as the 150 MHz step. Raising the board clock therefore requires an architectural
 change, not more stage-splitting: per-bank registered address/data/write
 distribution (each bank gets interface registers placed beside it), which
 makes memory access a 2-cycle contract and forces a redesign of all six

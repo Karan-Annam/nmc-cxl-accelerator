@@ -10,7 +10,8 @@
 // the core directly) so the whole chain — UART bit stream up, bridge, link
 // layer, engine — simulates before hardware exists.
 module fpga_top #(
-  parameter int unsigned UART_DIVISOR = 45   // core_clk / baud (90 MHz / 2 Mbaud)
+  parameter int unsigned UART_DIVISOR = 53   // core_clk / baud (105.88 MHz ≈ 2 Mbaud,
+                                             // 0.1% off — UART resyncs every byte)
 )(
   input  logic clk100,      // 100 MHz board oscillator
   input  logic ck_rstn,     // board reset button (active low)
@@ -26,19 +27,19 @@ module fpga_top #(
   assign clk_core    = clk100;
   assign mmcm_locked = 1'b1;
 `else
-  // 100 MHz x 9.0 / 10.0 = 90 MHz (VCO 900 MHz, inside the -1 600-1200 range).
-  // ~90 MHz is the measured ROUTED ceiling of this architecture: the engine's
-  // central address/write muxes reach every BRAM column, and that
-  // distribution wire alone is ~9 ns across the die (routed worst path
-  // 10.9 ns, 88% route — see fpga/README). 150 MHz closes in out-of-context
-  // synthesis but not in routing; raising the board clock needs per-bank
-  // registered distribution (a 2-cycle memory contract).
+  // 100 MHz x 9.0 / 8.5 = 105.88 MHz (VCO 900 MHz, inside the -1 600-1200
+  // range). Tier-1 per-bank outpost registers (2-cycle memory contract)
+  // removed the engine→bank write/address crossing and lifted the routed
+  // ceiling from ~90 to ~112 MHz; the remaining wall is the READ-return
+  // crossing (bank DO → lane-rotation mux → PE operand regs, measured
+  // 8.9 ns routed) — fixing it needs the registered return crossbar
+  // (3-cycle reads) tracked on the roadmap.
   logic clk_fb, clk_core_unbuf;
   MMCME2_BASE #(
     .CLKIN1_PERIOD   (10.000),
     .CLKFBOUT_MULT_F (9.000),
     .DIVCLK_DIVIDE   (1),
-    .CLKOUT0_DIVIDE_F(10.000)
+    .CLKOUT0_DIVIDE_F(8.500)
   ) u_mmcm (
     .CLKIN1   (clk100),
     .CLKFBIN  (clk_fb),
@@ -111,7 +112,7 @@ module fpga_top #(
       tx_stretch_q <= tx_pulse ? '1 : (tx_stretch_q != 0 ? tx_stretch_q - 1'b1 : '0);
     end
   end
-  assign led[0] = hb_q[26];             // ~0.7 Hz heartbeat at 90 MHz
+  assign led[0] = hb_q[26];             // ~0.8 Hz heartbeat at 105.88 MHz
   assign led[1] = (rx_stretch_q != 0);  // host flit landed
   assign led[2] = (tx_stretch_q != 0);  // device flit sent
   assign led[3] = frame_err;            // UART resync occurred (sticky)

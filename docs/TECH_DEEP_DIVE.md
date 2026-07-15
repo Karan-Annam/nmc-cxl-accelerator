@@ -143,10 +143,11 @@ with zero stall logic**. Three overlaps stack on top:
   accumulator *plus* the final chunk's still-in-flight product, so the
   2-stage PE multiply pipe costs the cadence nothing).
 
-Steady state: ⌈d_k/8⌉+1 cycles per row → measured **7.03 elements/cycle**
-sparse (9.11 cycles per d_k=64 row), 7.59 dense, 7.01 wgather, on 8 lanes.
-The original design walked 1 word per 2 cycles on a single bank — the walk
-is a **14.7× speedup** on the gather itself. `REDUCTION` deliberately stays
+Steady state: ⌈d_k/8⌉+2 cycles per row → measured **6.33 elements/cycle**
+sparse (10.12 cycles per d_k=64 row), 7.53 dense, 6.31 wgather, on 8 lanes
+(the +2 is the 2-cycle bank read of the Tier-1 outpost registers — the
+routed-clock trade). The original design walked 1 word per 2 cycles on a
+single bank — the walk is a **13× speedup** on the gather itself. `REDUCTION` deliberately stays
 on the narrow schedule: its per-index gathers are *arbitrary* addresses — the
 one pattern where 8 simultaneous fetches genuinely can collide on a bank.
 
@@ -248,10 +249,13 @@ two clamps, TWO asynchronous 256-entry LUT reads, a 33×12 multiply, and a
   config (`HDM_WORDS=32768` in `fpga/synth.tcl`) fits entirely in block RAM
   (64/75 tiles); simulation always runs the full 64K map.
 
-Throughput cost of all of the above (including the deeper 150 MHz pipelining
-for the Arty port): sparse 7.06 → 7.03 elems/cycle, wgather
-7.04 → 7.01, dense 132 → 135 cycles at len 1024 — the added latency hides in
-existing prefetch slack and drain states. Remaining honest gap: ~43.8k LUTs
+Throughput cost of all of the above plus the Tier-1 2-cycle memory
+contract: sparse 7.06 → 6.33 elems/cycle, wgather 7.04 → 6.31, dense
+132 → 136 cycles at len 1024 — in exchange the routed clock ceiling moved
+from ~90 to ~112 MHz (the write/address die-crossing is gone; the read-return
+crossing is the next wall, and fixing it — a registered return crossbar,
+3-cycle reads — needs the walk made issue-continuous first or the 6.0
+elems/cycle floor breaks). Remaining honest gap: ~43.8k LUTs
 vs the xc7s50's 32.6k (synthesis estimate) — placing on this part needs LUT
 reduction (rx/response queues to BRAM, CRC sharing), tracked on the roadmap.
 

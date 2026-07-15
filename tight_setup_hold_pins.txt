@@ -1,0 +1,8 @@
++====================+===================+===========================================+
+| Launch Setup Clock | Launch Hold Clock | Pin                                       |
++====================+===================+===========================================+
+| clk_core_unbuf     | clk_core_unbuf    | u_nmc/u_softmax/div_num_q_reg[35]/D       |
+| clk_core_unbuf     | clk_core_unbuf    | u_nmc/g_banks[0].u_bank/wdata_q_reg[19]/D |
+| clk_core_unbuf     | clk_core_unbuf    | u_nmc/g_banks[7].u_bank/wdata_q_reg[19]/D |
+| clk_core_unbuf     | clk_core_unbuf    | u_nmc/u_softmax/div_num_q_reg[43]/D       |
++--------------------+-------------------+-------------------------------------------+
